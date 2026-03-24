@@ -1,0 +1,174 @@
+{
+  "assays": [
+    {
+      "assay_id": "a_st01_se01",
+      "measurement_type": "Vibration",
+      "n_processed_files": 1,
+      "n_raw_files": 0,
+      "n_runs": 1,
+      "sensor_alias": "a_st01_se01",
+      "sensor_id": "aaaabbbb-0000-0000-0000-000000000001",
+      "study_id": "st1-uuid",
+      "study_title": "Test Study",
+      "technology_platform": "Generic",
+      "technology_type": "Accelerometer"
+    }
+  ],
+  "contacts": [
+    {
+      "affiliation": "Test Lab",
+      "contact_id": "alice-contact",
+      "email": "alice@example.com",
+      "first_name": "Alice",
+      "full_name": "Alice Example",
+      "last_name": "Example",
+      "orcid": "0000-0001-0000-0001",
+      "roles": [
+        "Investigation"
+      ]
+    },
+    {
+      "affiliation": "Test Lab",
+      "contact_id": "bob-contact",
+      "email": "bob@example.com",
+      "first_name": "Bob",
+      "full_name": "Bob Example",
+      "last_name": "Example",
+      "orcid": null,
+      "roles": [
+        "Data curation"
+      ]
+    }
+  ],
+  "factors": [
+    {
+      "description": null,
+      "factor_id": "#factor/f1",
+      "factor_name": "Speed",
+      "factor_type": "Operating condition",
+      "study_id": "st1-uuid",
+      "study_title": "Test Study",
+      "unit": null
+    }
+  ],
+  "generated_at_utc": "<GENERATED_AT_UTC>",
+  "investigation": {
+    "description": "Test investigation",
+    "experiment_type": "diagnostic-single",
+    "identifier": "test-inv-001",
+    "n_contacts": 2,
+    "n_publications": 1,
+    "n_studies": 1,
+    "title": "Test Investigation"
+  },
+  "publications": [
+    {
+      "author_tokens": [
+        "alice-contact",
+        "bob-contact"
+      ],
+      "corresponding_author": "alice-contact",
+      "doi": "10.1000/example.doi",
+      "pubmed_id": null,
+      "resolved_author_emails": [
+        "alice@example.com",
+        "bob@example.com"
+      ],
+      "resolved_author_names": [
+        "Alice Example",
+        "Bob Example"
+      ],
+      "status": "Published",
+      "title": "An Example ISA-PHM Publication",
+      "unresolved_author_tokens": []
+    }
+  ],
+  "schema_version": "isa_phm.ai_context.v1",
+  "semantic_manifest": {
+    "assay_measurement_params": {
+      "st1-uuid:a_st01_se01": []
+    },
+    "assay_processing_params": {
+      "st1-uuid:a_st01_se01": []
+    },
+    "diagnostics": {
+      "ambiguous_fields": 0,
+      "ambiguous_ratio": 0.0,
+      "mapped_fields": 0,
+      "missing_override_fields": [
+        "Speed"
+      ],
+      "strict_violations": [
+        "SEM_UNKNOWN_RATIO_EXCEEDED"
+      ],
+      "total_fields": 1,
+      "unknown_fields": 1,
+      "unknown_ratio": 1.0
+    },
+    "investigation_id": "test-inv-001",
+    "study_factors": {
+      "st1-uuid": [
+        {
+          "candidates": [],
+          "confidence": 0.0,
+          "context": {
+            "factor_type": "Operating condition",
+            "unit": ""
+          },
+          "provenance": "no_match",
+          "semantic_key": "unknown",
+          "source_kind": "factor",
+          "source_name": "Speed",
+          "status": "unknown"
+        }
+      ]
+    }
+  },
+  "source_path": "<SOURCE_PATH>",
+  "studies": [
+    {
+      "description": "Minimal test study",
+      "n_assays": 1,
+      "n_factors": 1,
+      "n_runs": 1,
+      "study_id": "st1-uuid",
+      "title": "Test Study"
+    }
+  ],
+  "validation_report": {
+    "issues": [
+      {
+        "code": "RAW_FILE_PATH_EMPTY",
+        "context": {},
+        "level": "info",
+        "message": "Raw data file record exists but path is empty.",
+        "scope": "study:st1-uuid/assay:a_st01_se01/run:run_01"
+      },
+      {
+        "code": "SEM_UNKNOWN_FIELDS",
+        "context": {
+          "unknown_fields": 1,
+          "unknown_ratio": 1.0
+        },
+        "level": "warning",
+        "message": "Unknown semantic fields detected.",
+        "scope": "semantic"
+      },
+      {
+        "code": "SEM_UNKNOWN_RATIO_EXCEEDED",
+        "context": {
+          "max_ambiguous_ratio": 0.0,
+          "max_unknown_ratio": 0.05,
+          "require_override_config": false
+        },
+        "level": "warning",
+        "message": "Semantic strict threshold would fail.",
+        "scope": "semantic"
+      }
+    ],
+    "n_errors": 0,
+    "n_info": 1,
+    "n_warnings": 2,
+    "ok": true
+  }
+}

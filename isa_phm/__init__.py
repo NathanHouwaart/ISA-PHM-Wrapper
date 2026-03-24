@@ -14,6 +14,7 @@ Quick start::
 from .wrapper import ISAWrapper
 from .plotter import ISAPlotter, PlotConfig
 from .semantic import SemanticNormalizer
+from .tools import ToolRegistry
 from .schemas import (
     DataLoadMetadata,
     DatasetValidationReport,
@@ -43,6 +44,7 @@ __all__ = [
     "ISAPlotter",
     "PlotConfig",
     "SemanticNormalizer",
+    "ToolRegistry",
     "DataLoadMetadata",
     "DatasetValidationReport",
     "PublicationModel",

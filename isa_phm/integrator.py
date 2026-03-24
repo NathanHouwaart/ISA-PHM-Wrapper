@@ -35,6 +35,7 @@ STANDARD_COLUMNS = (
 
 REQUESTED_FILE_TYPES: tuple[str, ...] = ("raw", "processed", "auto")
 RESOLVED_FILE_TYPES: tuple[str, ...] = ("raw", "processed")
+CSV_BAD_LINE_MODES: tuple[str, ...] = ("error", "warn", "skip")
 
 
 @dataclass(frozen=True)
@@ -42,6 +43,12 @@ class _CSVReadConfig:
     engine: Literal["c", "python"]
     sep: str | None
     encoding: str
+
+
+@dataclass(frozen=True)
+class _CSVReadDecision:
+    config: _CSVReadConfig
+    source: str
 
 
 class _FIFOCache:
@@ -83,12 +90,14 @@ class DataIntegrator:
         enable_chunked_large_file_mode: bool = True,
         large_file_threshold_mb: float = 64.0,
         chunk_rows: int = 250_000,
+        csv_bad_lines: Literal["error", "warn", "skip"] = "error",
     ) -> None:
         self._data_root = Path(data_root)
         self._cache = _FIFOCache(maxsize=cache_maxsize)
         self._enable_chunked_large_file_mode = enable_chunked_large_file_mode
         self._large_file_threshold_mb = max(0.0, float(large_file_threshold_mb))
         self._chunk_rows = max(1, int(chunk_rows))
+        self._csv_bad_lines = self._validate_csv_bad_lines(csv_bad_lines)
         self._load_lock_guard = threading.Lock()
         self._load_locks: dict[tuple, threading.Lock] = {}
 
@@ -139,6 +148,7 @@ class DataIntegrator:
             cached = self._cache.get(cache_key)
             if cached is not None:
                 logger.debug("Cache hit: %s", cache_key)
+                csv_config = cached.attrs.get("csv_config", {})
                 return cached, DataLoadMetadata(
                     assay_id=assay.assay_id,
                     run_id=run.run_id,
@@ -146,10 +156,22 @@ class DataIntegrator:
                     resolved_file_type=resolved_file_type,
                     file_path=data_file.path,
                     from_cache=True,
+                    csv_engine=csv_config.get("engine"),
+                    csv_sep=csv_config.get("sep"),
+                    csv_encoding=csv_config.get("encoding"),
+                    csv_detection_source=csv_config.get("source"),
+                    csv_bad_lines=csv_config.get("on_bad_lines", self._csv_bad_lines),
                 )
 
-            df = self._read_csv(Path(data_file.path))
+            df, read_decision = self._read_csv(Path(data_file.path), return_decision=True)
             self._normalize_time(df, run)
+            df.attrs["csv_config"] = {
+                "engine": read_decision.config.engine,
+                "sep": read_decision.config.sep,
+                "encoding": read_decision.config.encoding,
+                "source": read_decision.source,
+                "on_bad_lines": self._csv_bad_lines,
+            }
             self._cache.put(cache_key, df)
             return df, DataLoadMetadata(
                 assay_id=assay.assay_id,
@@ -158,6 +180,11 @@ class DataIntegrator:
                 resolved_file_type=resolved_file_type,
                 file_path=data_file.path,
                 from_cache=False,
+                csv_engine=read_decision.config.engine,
+                csv_sep=read_decision.config.sep,
+                csv_encoding=read_decision.config.encoding,
+                csv_detection_source=read_decision.source,
+                csv_bad_lines=self._csv_bad_lines,
             )
 
     # ------------------------------------------------------------------
@@ -342,6 +369,18 @@ class DataIntegrator:
         return cast(Literal["raw", "processed", "auto"], normalized)
 
     @staticmethod
+    def _validate_csv_bad_lines(
+        csv_bad_lines: str,
+    ) -> Literal["error", "warn", "skip"]:
+        normalized = str(csv_bad_lines).strip().lower()
+        if normalized not in CSV_BAD_LINE_MODES:
+            raise DataFileError(
+                f"Invalid csv_bad_lines '{csv_bad_lines}'. "
+                f"Use one of: {CSV_BAD_LINE_MODES}."
+            )
+        return cast(Literal["error", "warn", "skip"], normalized)
+
+    @staticmethod
     def _resolve_data_file(
         assay_id: str,
         run: RunRecord,
@@ -446,7 +485,12 @@ class DataIntegrator:
             self._cache.put(cache_key, df)
             return self._get_value_column(df)
 
-    def _read_csv(self, path: Path) -> pd.DataFrame:
+    def _read_csv(
+        self,
+        path: Path,
+        *,
+        return_decision: bool = False,
+    ) -> pd.DataFrame | tuple[pd.DataFrame, _CSVReadDecision]:
         """Read a 2-column measurement CSV/TSV into [time, value]."""
         if not path.exists():
             raise DataFileError(
@@ -455,7 +499,8 @@ class DataIntegrator:
             )
 
         logger.debug("Reading CSV: '%s'.", path)
-        read_config = self._detect_csv_read_config(path)
+        read_decision = self._detect_csv_read_config(path)
+        read_config = read_decision.config
         try:
             df = self._read_csv_frame(path, read_config)
         except Exception as exc:
@@ -487,12 +532,14 @@ class DataIntegrator:
         df.columns = ["time", "value"]
         df["value"] = pd.to_numeric(df["value"], errors="coerce")
         df["time"] = _to_float_seconds(df["time"])
+        if return_decision:
+            return df, read_decision
         return df
 
     def _read_values_chunked(self, path: Path) -> pd.Series:
         """Stream only the value column for large files to reduce memory use."""
-        read_config = self._detect_csv_read_config(path)
-        chunks = self._iter_csv_chunks(path, read_config)
+        read_decision = self._detect_csv_read_config(path)
+        chunks = self._iter_csv_chunks(path, read_decision.config)
         first_chunk = True
         warned_extra_cols = False
         arrays: list[np.ndarray] = []
@@ -529,15 +576,16 @@ class DataIntegrator:
             return pd.Series(arrays[0], dtype=np.float64)
         return pd.Series(np.concatenate(arrays), dtype=np.float64)
 
-    def _detect_csv_read_config(self, path: Path) -> _CSVReadConfig:
+    def _detect_csv_read_config(self, path: Path) -> _CSVReadDecision:
         """Detect a workable CSV read configuration with a small probe pass."""
         # Fast path: C engine with explicit common separators.
         for sep in (",", "\t", ";"):
             for encoding in ("utf-8", "latin-1"):
                 config = _CSVReadConfig(engine="c", sep=sep, encoding=encoding)
                 if self._probe_csv(path, config):
-                    self._log_csv_config(path, config, source="common-separators")
-                    return config
+                    decision = _CSVReadDecision(config=config, source="common-separators")
+                    self._log_csv_config(path, decision)
+                    return decision
 
         # Fallback 1: sniff delimiter once, then retry C engine.
         sniff_sep = self._sniff_delimiter(path)
@@ -545,37 +593,45 @@ class DataIntegrator:
             for encoding in ("utf-8", "latin-1"):
                 config = _CSVReadConfig(engine="c", sep=sniff_sep, encoding=encoding)
                 if self._probe_csv(path, config):
-                    self._log_csv_config(path, config, source="sniffed-delimiter")
-                    return config
+                    decision = _CSVReadDecision(config=config, source="sniffed-delimiter")
+                    self._log_csv_config(path, decision)
+                    return decision
 
         # Fallback 2: Python engine with auto-detection.
         for encoding in ("utf-8", "latin-1"):
             config = _CSVReadConfig(engine="python", sep=None, encoding=encoding)
             if self._probe_csv(path, config):
-                self._log_csv_config(path, config, source="python-auto")
-                return config
+                decision = _CSVReadDecision(config=config, source="python-auto")
+                self._log_csv_config(path, decision)
+                return decision
 
         raise DataFileError(f"Cannot decode '{path}'. Tried UTF-8 and Latin-1.")
 
-    @staticmethod
-    def _log_csv_config(path: Path, config: _CSVReadConfig, source: str) -> None:
-        if config.encoding != "utf-8" or config.engine == "python":
+    def _log_csv_config(self, path: Path, decision: _CSVReadDecision) -> None:
+        config = decision.config
+        if (
+            config.encoding != "utf-8"
+            or config.engine == "python"
+            or self._csv_bad_lines != "error"
+        ):
             logger.info(
-                "CSV config selected for '%s': engine=%s sep=%r encoding=%s source=%s",
+                "CSV config selected for '%s': engine=%s sep=%r encoding=%s source=%s on_bad_lines=%s",
                 path,
                 config.engine,
                 config.sep,
                 config.encoding,
-                source,
+                decision.source,
+                self._csv_bad_lines,
             )
         else:
             logger.debug(
-                "CSV config selected for '%s': engine=%s sep=%r encoding=%s source=%s",
+                "CSV config selected for '%s': engine=%s sep=%r encoding=%s source=%s on_bad_lines=%s",
                 path,
                 config.engine,
                 config.sep,
                 config.encoding,
-                source,
+                decision.source,
+                self._csv_bad_lines,
             )
 
     @staticmethod
@@ -601,8 +657,8 @@ class DataIntegrator:
         except Exception:
             return False
 
-    @staticmethod
     def _read_csv_frame(
+        self,
         path: Path,
         config: _CSVReadConfig,
         nrows: int | None = None,
@@ -614,7 +670,7 @@ class DataIntegrator:
             encoding=config.encoding,
             header=None,
             dtype=str,
-            on_bad_lines="error",
+            on_bad_lines=self._csv_bad_lines,
             nrows=nrows,
         )
 
@@ -630,7 +686,7 @@ class DataIntegrator:
             encoding=config.encoding,
             header=None,
             dtype=str,
-            on_bad_lines="error",
+            on_bad_lines=self._csv_bad_lines,
             chunksize=self._chunk_rows,
         )
 

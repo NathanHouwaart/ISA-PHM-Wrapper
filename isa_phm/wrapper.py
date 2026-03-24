@@ -25,10 +25,11 @@ import json
 import logging
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Literal
 
 if TYPE_CHECKING:
     import pandas as pd
+    from .tools import ToolRegistry
 
 from .extractor import MetadataExtractor
 from .integrator import DataIntegrator
@@ -74,6 +75,8 @@ class ISAWrapper:
         Minimum file size (MB) that triggers chunked large-file mode.
     chunk_rows : int
         Number of rows per chunk when large-file mode is active.
+    csv_bad_lines : "error" | "warn" | "skip"
+        CSV malformed-line behavior. Default ``"error"`` (strict).
     plot_config : PlotConfig | None
         Optional style overrides passed to ISAPlotter.
     semantic_config_path : str | Path | None
@@ -90,6 +93,7 @@ class ISAWrapper:
         enable_chunked_large_file_mode: bool = True,
         large_file_threshold_mb: float = 64.0,
         chunk_rows: int = 250_000,
+        csv_bad_lines: Literal["error", "warn", "skip"] = "error",
         plot_config: PlotConfig | None = None,
         semantic_config_path: str | Path | None = None,
     ) -> None:
@@ -124,6 +128,7 @@ class ISAWrapper:
             enable_chunked_large_file_mode=enable_chunked_large_file_mode,
             large_file_threshold_mb=large_file_threshold_mb,
             chunk_rows=chunk_rows,
+            csv_bad_lines=csv_bad_lines,
         )
         plotter = ISAPlotter(config=plot_config)
         semantic = SemanticNormalizer(override_config_path=semantic_config_path)
@@ -137,6 +142,7 @@ class ISAWrapper:
         self._semantic: SemanticNormalizer = semantic
         self._repair_log: RepairLog = repair_log
         self._source_path: Path = path
+        self._tool_registry: ToolRegistry | None = None
 
         n_repairs = len(repair_log)
         if n_repairs:
@@ -160,6 +166,26 @@ class ISAWrapper:
     def source_path(self) -> Path:
         """Absolute path to the ISA-JSON source file."""
         return self._source_path
+
+    # ------------------------------------------------------------------
+    # AI tool interface
+    # ------------------------------------------------------------------
+
+    def tool_registry(self) -> "ToolRegistry":
+        """Return a JSON-only tool registry for AI agent integrations."""
+        if self._tool_registry is None:
+            from .tools import ToolRegistry
+
+            self._tool_registry = ToolRegistry(self)
+        return self._tool_registry
+
+    def list_tools(self) -> list[dict[str, Any]]:
+        """List available AI-facing tools and their input schemas."""
+        return self.tool_registry().list_tools()
+
+    def call_tool(self, name: str, args: dict[str, Any] | None = None) -> dict[str, Any]:
+        """Invoke an AI-facing tool by name using a JSON payload."""
+        return self.tool_registry().invoke(name=name, args=args)
 
     # ------------------------------------------------------------------
     # High-level inspection

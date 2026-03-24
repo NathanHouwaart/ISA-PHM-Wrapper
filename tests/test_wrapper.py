@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from pathlib import Path
 
 import pandas as pd
 import pytest
@@ -199,6 +200,22 @@ class TestAIContextExport:
         assert "semantic_manifest" not in payload
         assert "validation_report" not in payload
 
+    def test_ai_context_matches_golden_snapshot(
+        self, minimal_publication_isa_file, tmp_path
+    ):
+        wrapper = ISAWrapper(
+            minimal_publication_isa_file,
+            data_root=tmp_path,
+            strict_validation=False,
+        )
+        payload = wrapper.ai_context(include_semantics=True, include_validation=True)
+        payload["generated_at_utc"] = "<GENERATED_AT_UTC>"
+        payload["source_path"] = "<SOURCE_PATH>"
+
+        snapshot_path = Path(__file__).parent / "golden" / "ai_context_minimal_publication.json"
+        expected = json.loads(snapshot_path.read_text(encoding="utf-8"))
+        assert payload == expected
+
 
 class TestValidateDataset:
     def test_validate_dataset_returns_structured_report(
@@ -318,7 +335,9 @@ class TestWrapperPerformanceOptions:
             enable_chunked_large_file_mode=False,
             large_file_threshold_mb=12.5,
             chunk_rows=4096,
+            csv_bad_lines="warn",
         )
         assert wrapper._integrator._enable_chunked_large_file_mode is False
         assert wrapper._integrator._large_file_threshold_mb == 12.5
         assert wrapper._integrator._chunk_rows == 4096
+        assert wrapper._integrator._csv_bad_lines == "warn"

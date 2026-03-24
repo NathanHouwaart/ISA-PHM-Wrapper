@@ -427,6 +427,11 @@ class DataLoadMetadata(BaseModel):
     resolved_file_type: Literal["raw", "processed"]
     file_path: str
     from_cache: bool = False
+    csv_engine: Literal["c", "python"] | None = None
+    csv_sep: str | None = None
+    csv_encoding: str | None = None
+    csv_detection_source: str | None = None
+    csv_bad_lines: Literal["error", "warn", "skip"] | None = None
 
 
 # ---------------------------------------------------------------------------

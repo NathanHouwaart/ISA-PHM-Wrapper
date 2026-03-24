@@ -84,6 +84,18 @@ class TestCSVLoading:
         with pytest.raises(DataFileError, match="Failed to read|Cannot decode"):
             integrator._read_csv(p)
 
+    def test_bad_csv_row_can_be_lenient_when_configured(self, tmp_path):
+        p = tmp_path / "bad_rows_lenient.csv"
+        p.write_text("0,1\n1,2,3\n2,3\n", encoding="utf-8")
+        integrator = DataIntegrator(
+            data_root=tmp_path,
+            cache_maxsize=5,
+            csv_bad_lines="skip",
+        )
+        df = integrator._read_csv(p)
+        assert list(df.columns) == ["time", "value"]
+        assert len(df) >= 2
+
     def test_latin1_config_selection_is_logged(self, tmp_path, caplog):
         p = tmp_path / "latin1.csv"
         # First row is a non-numeric header-like row with Latin-1 byte 0xE9.
@@ -245,6 +257,10 @@ class TestLifecycleStreaming:
 # ---------------------------------------------------------------------------
 
 class TestFileTypeContract:
+    def test_invalid_csv_bad_lines_mode_raises(self, tmp_path):
+        with pytest.raises(DataFileError, match="Invalid csv_bad_lines"):
+            DataIntegrator(data_root=tmp_path, csv_bad_lines="banana")
+
     def test_invalid_file_type_raises(self, minimal_single_run_isa_file, tmp_path):
         raw = ISAParser(strict=False).load(minimal_single_run_isa_file)
         inv = _make_investigation(raw, tmp_path)
@@ -273,6 +289,10 @@ class TestFileTypeContract:
         assert meta.requested_file_type == "auto"
         assert meta.resolved_file_type == "processed"
         assert meta.from_cache is False
+        assert meta.csv_engine in {"c", "python"}
+        assert meta.csv_encoding in {"utf-8", "latin-1"}
+        assert meta.csv_detection_source is not None
+        assert meta.csv_bad_lines == "error"
 
     def test_auto_falls_back_to_raw_and_reports_resolved_type(
         self, minimal_single_run_isa_file, tmp_csv, tmp_path

@@ -1,6 +1,6 @@
 [project]
 name = "isa-phm"
-version = "0.1.0"
+version = "0.2.0"
 description = "Python wrapper for ISA-PHM datasets — parse, explore, and analyse PHM metadata and measurement data"
 requires-python = ">=3.10"
 dependencies = [

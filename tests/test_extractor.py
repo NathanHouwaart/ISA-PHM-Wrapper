@@ -232,3 +232,23 @@ class TestProcessChainHardFailures:
 
         with pytest.raises(ExtractionError, match="did not cover all processes"):
             extractor.extract(minimal_single_run_isa)
+
+
+class TestDataFileExistenceFreshness:
+    def test_datafile_tracks_extract_snapshot_and_live_existence(
+        self, extractor, minimal_single_run_isa, tmp_csv
+    ):
+        assay = minimal_single_run_isa["studies"][0]["assays"][0]
+        for data_file in assay["dataFiles"]:
+            if data_file.get("type") == "Processed Data File":
+                data_file["name"] = str(tmp_csv)
+
+        inv = extractor.extract(minimal_single_run_isa)
+        run = inv.studies[0].assays[0].runs[0]
+        assert run.processed_file is not None
+        assert run.processed_file.exists_at_extract is True
+        assert run.processed_file.exists is True
+
+        tmp_csv.unlink()
+        assert run.processed_file.exists_at_extract is True
+        assert run.processed_file.exists is False

@@ -91,6 +91,7 @@ class MetadataExtractor:
         publications = [
             self._extract_publication(p) for p in repaired.get("publications", [])
         ]
+        self._link_publications_to_contacts(publications, contacts)
         studies = [
             self._extract_study(s, resolver)
             for s in repaired.get("studies", [])
@@ -374,7 +375,7 @@ class MetadataExtractor:
                 id=df_id,
                 path=name,
                 file_type=file_type,
-                exists=exists,
+                exists_at_extract=exists,
             )
         return index
 
@@ -394,6 +395,7 @@ class MetadataExtractor:
                 orcid = comment.get("value") or None
 
         return ContactModel(
+            contact_id=self._normalize_contact_token(person.get("@id")),
             first_name=person.get("firstName", ""),
             last_name=person.get("lastName", ""),
             email=person.get("email", ""),
@@ -444,6 +446,55 @@ class MetadataExtractor:
             author_tokens=author_tokens,
             corresponding_author=corresponding_author,
         )
+
+    @staticmethod
+    def _normalize_contact_token(raw: Any) -> str | None:
+        if raw is None:
+            return None
+        token = str(raw).strip().lstrip("#")
+        return token or None
+
+    def _link_publications_to_contacts(
+        self,
+        publications: list[PublicationModel],
+        contacts: list[ContactModel],
+    ) -> None:
+        """
+        Resolve publication author tokens to investigation contacts by contact_id.
+
+        Mapping is intentionally conservative: unresolved tokens are preserved and
+        never guessed.
+        """
+        contacts_by_id = {
+            c.contact_id: c
+            for c in contacts
+            if c.contact_id
+        }
+        for pub in publications:
+            resolved_names: list[str] = []
+            resolved_emails: list[str] = []
+            unresolved: list[str] = []
+            seen_names: set[str] = set()
+            seen_emails: set[str] = set()
+
+            for token in pub.author_tokens:
+                normalized = self._normalize_contact_token(token)
+                contact = contacts_by_id.get(normalized) if normalized else None
+                if contact is None:
+                    unresolved.append(token)
+                    continue
+
+                full_name = contact.full_name
+                if full_name and full_name not in seen_names:
+                    resolved_names.append(full_name)
+                    seen_names.add(full_name)
+                if contact.email and contact.email not in seen_emails:
+                    resolved_emails.append(contact.email)
+                    seen_emails.add(contact.email)
+
+            pub.resolved_author_names = resolved_names
+            pub.resolved_author_emails = resolved_emails
+            pub.unresolved_author_tokens = unresolved
 
     # ------------------------------------------------------------------
     # Helpers

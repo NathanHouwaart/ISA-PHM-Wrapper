@@ -1,6 +1,9 @@
-﻿from __future__ import annotations
+from __future__ import annotations
+
+import pytest
 
 from isa_phm import ISAWrapper
+from isa_phm.errors import ValidationError
 
 
 class TestSemanticManifest:
@@ -73,3 +76,41 @@ class TestSemanticProxyMethods:
         params = assay.semantic_parameters()
         assert "measurement" in params and "processing" in params
         assert any(p.semantic_key == "sampling_frequency" for p in params["measurement"])
+
+
+class TestSemanticStrictControls:
+    def test_require_override_config_fails_without_config(
+        self, minimal_semantic_isa_file, tmp_path
+    ):
+        wrapper = ISAWrapper(
+            minimal_semantic_isa_file,
+            data_root=tmp_path,
+            strict_validation=False,
+        )
+        with pytest.raises(ValidationError, match="SEM_OVERRIDE_CONFIG_REQUIRED"):
+            wrapper.semantic_manifest(
+                strict=True,
+                max_unknown_ratio=1.0,
+                max_ambiguous_ratio=1.0,
+                require_override_config=True,
+            )
+
+    def test_strict_passes_with_override_config(
+        self,
+        minimal_semantic_isa_file,
+        semantic_override_config,
+        tmp_path,
+    ):
+        wrapper = ISAWrapper(
+            minimal_semantic_isa_file,
+            data_root=tmp_path,
+            strict_validation=False,
+            semantic_config_path=semantic_override_config,
+        )
+        manifest = wrapper.semantic_manifest(
+            strict=True,
+            max_unknown_ratio=0.30,
+            max_ambiguous_ratio=0.0,
+            require_override_config=True,
+        )
+        assert manifest.diagnostics.strict_violations == []

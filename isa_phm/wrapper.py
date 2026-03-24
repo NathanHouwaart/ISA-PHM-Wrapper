@@ -22,8 +22,9 @@ Example usage::
 from __future__ import annotations
 
 import logging
+from datetime import datetime, timezone
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
     import pandas as pd
@@ -36,11 +37,13 @@ from .preprocessor import ISAPreprocessor
 from .proxy import QueryNavigator, StudyProxy
 from .semantic import SemanticNormalizer
 from .schemas import (
+    DatasetValidationReport,
     InvestigationModel,
     InvestigationOverview,
     RepairLog,
     SemanticManifest,
     StudySummary,
+    ValidationIssue,
 )
 
 logger = logging.getLogger("isa_phm")
@@ -189,10 +192,6 @@ class ISAWrapper:
         """
         return self._investigation.contacts_df()
 
-    def investigation_contacts(self) -> "pd.DataFrame":
-        """Alias for :meth:`contacts` for explicit investigation-level discovery."""
-        return self.contacts()
-
     def publications(self) -> "pd.DataFrame":
         """
         Return investigation publications as a notebook-friendly DataFrame.
@@ -203,10 +202,6 @@ class ISAWrapper:
         commonly stores contact IDs there, not resolved names.
         """
         return self._investigation.publications_df()
-
-    def investigation_publications(self) -> "pd.DataFrame":
-        """Alias for :meth:`publications` for explicit investigation-level discovery."""
-        return self.publications()
 
     def extensive_summary(self) -> "dict[str, pd.DataFrame]":
         """
@@ -309,7 +304,7 @@ class ISAWrapper:
             ],
         )
         contacts_df = self.contacts().loc[
-            :, ["full_name", "email", "affiliation", "roles", "orcid"]
+            :, ["contact_id", "full_name", "email", "affiliation", "roles", "orcid"]
         ]
         publications_df = self.publications()
 
@@ -339,9 +334,447 @@ class ISAWrapper:
             "publications": publications_df,
         }
 
-    def semantic_manifest(self) -> SemanticManifest:
-        """Return normalized semantic labels for factors and protocol parameters."""
-        return self._semantic.build_manifest(self._investigation)
+    def semantic_manifest(
+        self,
+        *,
+        strict: bool = False,
+        max_unknown_ratio: float = 0.05,
+        max_ambiguous_ratio: float = 0.0,
+        require_override_config: bool = False,
+    ) -> SemanticManifest:
+        """
+        Return normalized semantic labels for factors and protocol parameters.
+
+        Parameters
+        ----------
+        strict : bool
+            When True, raise :class:`ValidationError` if strict thresholds fail.
+        max_unknown_ratio : float
+            Maximum allowed ratio of unknown semantic fields in strict mode.
+        max_ambiguous_ratio : float
+            Maximum allowed ratio of ambiguous semantic fields in strict mode.
+        require_override_config : bool
+            Require a user semantic override config for strict validation.
+        """
+        return self._semantic.build_manifest_with_controls(
+            self._investigation,
+            strict=strict,
+            max_unknown_ratio=max_unknown_ratio,
+            max_ambiguous_ratio=max_ambiguous_ratio,
+            require_override_config=require_override_config,
+        )
+
+    def ai_context(
+        self,
+        include_semantics: bool = True,
+        include_validation: bool = False,
+    ) -> dict[str, Any]:
+        """
+        Return a deterministic JSON-safe metadata export for AI pipelines.
+
+        The payload is metadata-only and never includes DataFrames or model objects.
+        """
+        investigation = self._investigation
+        generated_at = datetime.now(timezone.utc).replace(microsecond=0).isoformat()
+        source_path = str(self._source_path.resolve())
+
+        studies_rows: list[dict[str, Any]] = []
+        assays_rows: list[dict[str, Any]] = []
+        factors_rows: list[dict[str, Any]] = []
+        for study in sorted(investigation.studies, key=lambda s: (s.title.lower(), s.study_id)):
+            studies_rows.append(
+                {
+                    "study_id": study.study_id,
+                    "title": study.title,
+                    "description": study.description,
+                    "n_assays": len(study.assays),
+                    "n_runs": study.run_count,
+                    "n_factors": len(study.factors),
+                }
+            )
+
+            for assay in sorted(study.assays, key=lambda a: a.assay_id):
+                n_raw_files = sum(
+                    1 for run in assay.runs if run.raw_file is not None and bool(run.raw_file.path)
+                )
+                n_processed_files = sum(
+                    1
+                    for run in assay.runs
+                    if run.processed_file is not None and bool(run.processed_file.path)
+                )
+                assays_rows.append(
+                    {
+                        "study_id": study.study_id,
+                        "study_title": study.title,
+                        "assay_id": assay.assay_id,
+                        "sensor_alias": assay.sensor.alias,
+                        "sensor_id": assay.sensor.sensor_id,
+                        "measurement_type": assay.sensor.measurement_type,
+                        "technology_type": assay.sensor.technology_type,
+                        "technology_platform": assay.sensor.technology_platform,
+                        "n_runs": len(assay.runs),
+                        "n_raw_files": n_raw_files,
+                        "n_processed_files": n_processed_files,
+                    }
+                )
+
+            for factor in sorted(study.factors, key=lambda f: f.factor_name.lower()):
+                factors_rows.append(
+                    {
+                        "study_id": study.study_id,
+                        "study_title": study.title,
+                        "factor_id": factor.factor_id,
+                        "factor_name": factor.factor_name,
+                        "factor_type": factor.factor_type,
+                        "unit": factor.unit,
+                        "description": factor.description,
+                    }
+                )
+
+        contact_rows = [
+            {
+                "contact_id": contact.contact_id,
+                "first_name": contact.first_name,
+                "last_name": contact.last_name,
+                "full_name": contact.full_name,
+                "email": contact.email,
+                "affiliation": contact.affiliation,
+                "roles": list(contact.roles),
+                "orcid": contact.orcid,
+            }
+            for contact in sorted(
+                investigation.contacts,
+                key=lambda c: (c.full_name.lower(), c.email.lower(), c.contact_id or ""),
+            )
+        ]
+        publication_rows = [
+            {
+                "title": publication.title,
+                "doi": publication.doi,
+                "pubmed_id": publication.pubmed_id,
+                "status": publication.status,
+                "author_tokens": list(publication.author_tokens),
+                "corresponding_author": publication.corresponding_author,
+                "resolved_author_names": list(publication.resolved_author_names),
+                "resolved_author_emails": list(publication.resolved_author_emails),
+                "unresolved_author_tokens": list(publication.unresolved_author_tokens),
+            }
+            for publication in sorted(
+                investigation.publications,
+                key=lambda p: (p.title.lower(), p.doi or "", p.pubmed_id or ""),
+            )
+        ]
+
+        payload: dict[str, Any] = {
+            "schema_version": "isa_phm.ai_context.v1",
+            "generated_at_utc": generated_at,
+            "source_path": source_path,
+            "investigation": {
+                "title": investigation.title,
+                "description": investigation.description,
+                "identifier": investigation.identifier,
+                "experiment_type": investigation.experiment_type,
+                "n_studies": len(investigation.studies),
+                "n_contacts": len(investigation.contacts),
+                "n_publications": len(investigation.publications),
+            },
+            "contacts": contact_rows,
+            "publications": publication_rows,
+            "studies": studies_rows,
+            "assays": assays_rows,
+            "factors": factors_rows,
+        }
+
+        if include_semantics:
+            manifest = self.semantic_manifest(strict=False)
+            payload["semantic_manifest"] = {
+                "investigation_id": manifest.investigation_id,
+                "study_factors": {
+                    k: [f.model_dump() for f in sorted(v, key=lambda x: x.source_name.lower())]
+                    for k, v in sorted(manifest.study_factors.items(), key=lambda x: x[0])
+                },
+                "assay_measurement_params": {
+                    k: [f.model_dump() for f in sorted(v, key=lambda x: x.source_name.lower())]
+                    for k, v in sorted(
+                        manifest.assay_measurement_params.items(),
+                        key=lambda x: x[0],
+                    )
+                },
+                "assay_processing_params": {
+                    k: [f.model_dump() for f in sorted(v, key=lambda x: x.source_name.lower())]
+                    for k, v in sorted(
+                        manifest.assay_processing_params.items(),
+                        key=lambda x: x[0],
+                    )
+                },
+                "diagnostics": manifest.diagnostics.model_dump(),
+            }
+
+        if include_validation:
+            payload["validation_report"] = self.validate_dataset().model_dump()
+
+        return payload
+
+    def validate_dataset(
+        self,
+        *,
+        check_files: bool = True,
+        semantic_strict: bool = False,
+        max_unknown_ratio: float = 0.05,
+        max_ambiguous_ratio: float = 0.0,
+        require_override_config: bool = False,
+    ) -> DatasetValidationReport:
+        """
+        Return a structured dataset validation report.
+
+        Checks include structure completeness, file references, metadata quality,
+        and semantic coverage.
+        """
+        issues: list[ValidationIssue] = []
+
+        def add_issue(
+            *,
+            code: str,
+            level: str,
+            scope: str,
+            message: str,
+            context: dict[str, Any] | None = None,
+        ) -> None:
+            issues.append(
+                ValidationIssue(
+                    code=code,
+                    level=level,
+                    scope=scope,
+                    message=message,
+                    context=context or {},
+                )
+            )
+
+        inv = self._investigation
+        if not inv.title.strip():
+            add_issue(
+                code="INV_MISSING_TITLE",
+                level="warning",
+                scope="investigation",
+                message="Investigation title is empty.",
+            )
+        if not inv.identifier.strip():
+            add_issue(
+                code="INV_MISSING_IDENTIFIER",
+                level="warning",
+                scope="investigation",
+                message="Investigation identifier is empty.",
+            )
+        if not inv.studies:
+            add_issue(
+                code="INV_NO_STUDIES",
+                level="error",
+                scope="investigation",
+                message="No studies found in investigation.",
+            )
+
+        for contact in inv.contacts:
+            scope = f"contact:{contact.contact_id or contact.full_name}"
+            if not contact.email:
+                add_issue(
+                    code="CONTACT_MISSING_EMAIL",
+                    level="info",
+                    scope=scope,
+                    message="Contact has no email address.",
+                )
+            if not contact.full_name:
+                add_issue(
+                    code="CONTACT_MISSING_NAME",
+                    level="warning",
+                    scope=scope,
+                    message="Contact has no name fields.",
+                )
+
+        for publication in inv.publications:
+            scope = f"publication:{publication.title or 'untitled'}"
+            if not publication.title:
+                add_issue(
+                    code="PUBLICATION_MISSING_TITLE",
+                    level="warning",
+                    scope=scope,
+                    message="Publication title is empty.",
+                )
+            if publication.author_tokens and not publication.resolved_author_names:
+                add_issue(
+                    code="PUBLICATION_AUTHORS_UNRESOLVED",
+                    level="warning",
+                    scope=scope,
+                    message="Publication author tokens could not be resolved to contacts.",
+                    context={"author_tokens": publication.author_tokens},
+                )
+            elif publication.unresolved_author_tokens:
+                add_issue(
+                    code="PUBLICATION_AUTHORS_PARTIAL",
+                    level="info",
+                    scope=scope,
+                    message="Publication contains unresolved author tokens.",
+                    context={"unresolved_author_tokens": publication.unresolved_author_tokens},
+                )
+
+        for study in inv.studies:
+            study_scope = f"study:{study.study_id or study.title}"
+            if not study.assays:
+                add_issue(
+                    code="STUDY_NO_ASSAYS",
+                    level="error",
+                    scope=study_scope,
+                    message="Study has no assays.",
+                )
+            if not study.factors:
+                add_issue(
+                    code="STUDY_NO_FACTORS",
+                    level="warning",
+                    scope=study_scope,
+                    message="Study has no factors.",
+                )
+            if not study.title:
+                add_issue(
+                    code="STUDY_MISSING_TITLE",
+                    level="warning",
+                    scope=study_scope,
+                    message="Study title is empty.",
+                )
+
+            for assay in study.assays:
+                assay_scope = f"{study_scope}/assay:{assay.assay_id}"
+                if not assay.runs:
+                    add_issue(
+                        code="ASSAY_NO_RUNS",
+                        level="error",
+                        scope=assay_scope,
+                        message="Assay has no runs.",
+                    )
+                    continue
+
+                for run in assay.runs:
+                    run_scope = f"{assay_scope}/run:{run.run_id}"
+                    raw_path = run.raw_file.path if run.raw_file is not None else ""
+                    processed_path = (
+                        run.processed_file.path if run.processed_file is not None else ""
+                    )
+
+                    if not raw_path and not processed_path:
+                        add_issue(
+                            code="RUN_NO_DATA_FILE",
+                            level="error",
+                            scope=run_scope,
+                            message="Run has neither raw nor processed data file path.",
+                        )
+
+                    if run.raw_file is not None and not run.raw_file.path:
+                        add_issue(
+                            code="RAW_FILE_PATH_EMPTY",
+                            level="info",
+                            scope=run_scope,
+                            message="Raw data file record exists but path is empty.",
+                        )
+                    if run.processed_file is not None and not run.processed_file.path:
+                        add_issue(
+                            code="PROCESSED_FILE_PATH_EMPTY",
+                            level="info",
+                            scope=run_scope,
+                            message="Processed data file record exists but path is empty.",
+                        )
+
+                    if check_files:
+                        for kind, data_file in (
+                            ("raw", run.raw_file),
+                            ("processed", run.processed_file),
+                        ):
+                            if data_file is None or not data_file.path:
+                                continue
+                            if not data_file.exists:
+                                add_issue(
+                                    code="FILE_NOT_FOUND",
+                                    level="warning",
+                                    scope=run_scope,
+                                    message=f"{kind} data file path does not exist on disk.",
+                                    context={
+                                        "file_type": kind,
+                                        "path": data_file.path,
+                                        "exists_at_extract": data_file.exists_at_extract,
+                                    },
+                                )
+
+        manifest = self.semantic_manifest(
+            strict=False,
+            max_unknown_ratio=max_unknown_ratio,
+            max_ambiguous_ratio=max_ambiguous_ratio,
+            require_override_config=require_override_config,
+        )
+        diagnostics = manifest.diagnostics
+
+        if diagnostics.unknown_fields > 0:
+            add_issue(
+                code="SEM_UNKNOWN_FIELDS",
+                level="warning",
+                scope="semantic",
+                message="Unknown semantic fields detected.",
+                context={
+                    "unknown_fields": diagnostics.unknown_fields,
+                    "unknown_ratio": diagnostics.unknown_ratio,
+                },
+            )
+        if diagnostics.ambiguous_fields > 0:
+            add_issue(
+                code="SEM_AMBIGUOUS_FIELDS",
+                level="warning",
+                scope="semantic",
+                message="Ambiguous semantic fields detected.",
+                context={
+                    "ambiguous_fields": diagnostics.ambiguous_fields,
+                    "ambiguous_ratio": diagnostics.ambiguous_ratio,
+                },
+            )
+
+        violations = self._semantic.evaluate_strict_violations(
+            manifest,
+            max_unknown_ratio=max_unknown_ratio,
+            max_ambiguous_ratio=max_ambiguous_ratio,
+            require_override_config=require_override_config,
+        )
+        if semantic_strict and violations:
+            for code in violations:
+                add_issue(
+                    code=code,
+                    level="error",
+                    scope="semantic",
+                    message="Semantic strict validation violation.",
+                    context={
+                        "max_unknown_ratio": max_unknown_ratio,
+                        "max_ambiguous_ratio": max_ambiguous_ratio,
+                        "require_override_config": require_override_config,
+                    },
+                )
+        elif violations:
+            for code in violations:
+                add_issue(
+                    code=code,
+                    level="warning",
+                    scope="semantic",
+                    message="Semantic strict threshold would fail.",
+                    context={
+                        "max_unknown_ratio": max_unknown_ratio,
+                        "max_ambiguous_ratio": max_ambiguous_ratio,
+                        "require_override_config": require_override_config,
+                    },
+                )
+
+        n_errors = sum(1 for issue in issues if issue.level == "error")
+        n_warnings = sum(1 for issue in issues if issue.level == "warning")
+        n_info = sum(1 for issue in issues if issue.level == "info")
+        return DatasetValidationReport(
+            ok=(n_errors == 0),
+            n_errors=n_errors,
+            n_warnings=n_warnings,
+            n_info=n_info,
+            issues=issues,
+        )
 
     # ------------------------------------------------------------------
     # Fluent proxy navigation

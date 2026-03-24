@@ -15,7 +15,7 @@ class ParseError(ISAPHMError):
 
 
 class ValidationError(ISAPHMError):
-    """Raised when the ISA-JSON fails schema validation via isatools."""
+    """Raised when validation fails (schema and/or strict semantic checks)."""
 
 
 class PreprocessingError(ISAPHMError):

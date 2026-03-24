@@ -16,10 +16,12 @@ from .plotter import ISAPlotter, PlotConfig
 from .semantic import SemanticNormalizer
 from .schemas import (
     DataLoadMetadata,
+    DatasetValidationReport,
     PublicationModel,
     SemanticDiagnostics,
     SemanticField,
     SemanticManifest,
+    ValidationIssue,
 )
 from .errors import (
     ISAPHMError,
@@ -42,10 +44,12 @@ __all__ = [
     "PlotConfig",
     "SemanticNormalizer",
     "DataLoadMetadata",
+    "DatasetValidationReport",
     "PublicationModel",
     "SemanticField",
     "SemanticDiagnostics",
     "SemanticManifest",
+    "ValidationIssue",
     "ISAPHMError",
     "ParseError",
     "ValidationError",
@@ -59,4 +63,4 @@ __all__ = [
     "PlotError",
     "ExportError",
 ]
-__version__ = "0.1.0"
+__version__ = "0.2.0"

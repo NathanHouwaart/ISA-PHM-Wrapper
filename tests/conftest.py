@@ -439,6 +439,7 @@ def _make_publication_isa(data_file_paths: list[str]) -> dict:
     )
     isa["people"] = [
         {
+            "@id": "#alice-contact",
             "firstName": "Alice",
             "lastName": "Example",
             "email": "alice@example.com",
@@ -447,6 +448,7 @@ def _make_publication_isa(data_file_paths: list[str]) -> dict:
             "comments": [{"name": "orcid", "value": "0000-0001-0000-0001"}],
         },
         {
+            "@id": "#bob-contact",
             "firstName": "Bob",
             "lastName": "Example",
             "email": "bob@example.com",

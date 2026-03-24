@@ -9,6 +9,7 @@ from difflib import SequenceMatcher, get_close_matches
 from pathlib import Path
 from typing import Any, Literal
 
+from .errors import ValidationError
 from .schemas import (
     AssayModel,
     InvestigationModel,
@@ -253,6 +254,17 @@ class SemanticNormalizer:
         return {"measurement": measurement, "processing": processing}
 
     def build_manifest(self, investigation: InvestigationModel) -> SemanticManifest:
+        return self.build_manifest_with_controls(investigation)
+
+    def build_manifest_with_controls(
+        self,
+        investigation: InvestigationModel,
+        *,
+        strict: bool = False,
+        max_unknown_ratio: float = 0.05,
+        max_ambiguous_ratio: float = 0.0,
+        require_override_config: bool = False,
+    ) -> SemanticManifest:
         manifest = SemanticManifest(investigation_id=investigation.identifier)
 
         for study in investigation.studies:
@@ -266,7 +278,47 @@ class SemanticNormalizer:
                 manifest.assay_processing_params[key] = normalized["processing"]
 
         manifest.diagnostics = self._build_diagnostics(manifest)
+        violations = self.evaluate_strict_violations(
+            manifest,
+            max_unknown_ratio=max_unknown_ratio,
+            max_ambiguous_ratio=max_ambiguous_ratio,
+            require_override_config=require_override_config,
+        )
+        manifest.diagnostics.strict_violations = violations
+        if strict and violations:
+            raise ValidationError(
+                "Semantic strict validation failed "
+                f"(codes={violations}, "
+                f"unknown_ratio={manifest.diagnostics.unknown_ratio:.4f}, "
+                f"ambiguous_ratio={manifest.diagnostics.ambiguous_ratio:.4f}, "
+                f"missing_override_fields={manifest.diagnostics.missing_override_fields})."
+            )
         return manifest
+
+    def evaluate_strict_violations(
+        self,
+        manifest: SemanticManifest,
+        *,
+        max_unknown_ratio: float = 0.05,
+        max_ambiguous_ratio: float = 0.0,
+        require_override_config: bool = False,
+    ) -> list[str]:
+        diagnostics = manifest.diagnostics
+        violations: list[str] = []
+
+        if require_override_config and self._override_path is None:
+            violations.append("SEM_OVERRIDE_CONFIG_REQUIRED")
+
+        if diagnostics.unknown_ratio > max_unknown_ratio:
+            violations.append("SEM_UNKNOWN_RATIO_EXCEEDED")
+
+        if diagnostics.ambiguous_ratio > max_ambiguous_ratio:
+            violations.append("SEM_AMBIGUOUS_RATIO_EXCEEDED")
+
+        if require_override_config and diagnostics.missing_override_fields:
+            violations.append("SEM_MISSING_OVERRIDE_FIELDS")
+
+        return violations
 
     def _build_diagnostics(self, manifest: SemanticManifest) -> SemanticDiagnostics:
         fields: list[SemanticField] = []
@@ -281,12 +333,25 @@ class SemanticNormalizer:
         mapped = sum(1 for f in fields if f.status == "mapped")
         unknown = sum(1 for f in fields if f.status == "unknown")
         ambiguous = sum(1 for f in fields if f.status == "ambiguous")
+        unknown_ratio = (unknown / total) if total else 0.0
+        ambiguous_ratio = (ambiguous / total) if total else 0.0
+        missing_override_fields = sorted(
+            {
+                f.source_name
+                for f in fields
+                if f.status in {"unknown", "ambiguous"} and f.source_name
+            }
+        )
 
         return SemanticDiagnostics(
             total_fields=total,
             mapped_fields=mapped,
             unknown_fields=unknown,
             ambiguous_fields=ambiguous,
+            unknown_ratio=round(float(unknown_ratio), 6),
+            ambiguous_ratio=round(float(ambiguous_ratio), 6),
+            missing_override_fields=missing_override_fields,
+            strict_violations=[],
         )
 
     def _map_name(

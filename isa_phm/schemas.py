@@ -87,7 +87,7 @@ class DataFile(BaseModel):
     id: str
     path: str  # Resolved absolute path string (may be empty for unnamed raw files)
     file_type: str  # "Raw Data File" or "Processed Data File"
-    exists: bool = False  # Computed at extraction time
+    exists_at_extract: bool = False  # Snapshot captured during extraction
 
     @property
     def is_raw(self) -> bool:
@@ -96,6 +96,20 @@ class DataFile(BaseModel):
     @property
     def is_processed(self) -> bool:
         return "Processed" in self.file_type
+
+    @property
+    def exists(self) -> bool:
+        """
+        Live file existence check.
+
+        Unlike ``exists_at_extract``, this reflects current filesystem state.
+        """
+        if not self.path:
+            return False
+        try:
+            return Path(self.path).exists()
+        except OSError:
+            return False
 
     @property
     def as_path(self) -> Path | None:
@@ -184,6 +198,7 @@ class AssayModel(BaseModel):
 class ContactModel(BaseModel):
     """A person/contact from the investigation."""
 
+    contact_id: str | None = None
     first_name: str
     last_name: str
     email: str
@@ -205,6 +220,9 @@ class PublicationModel(BaseModel):
     status: str | None = None
     author_tokens: list[str] = Field(default_factory=list)
     corresponding_author: str | None = None
+    resolved_author_names: list[str] = Field(default_factory=list)
+    resolved_author_emails: list[str] = Field(default_factory=list)
+    unresolved_author_tokens: list[str] = Field(default_factory=list)
 
 
 class StudyModel(BaseModel):
@@ -250,6 +268,7 @@ class InvestigationModel(BaseModel):
 
         rows = [
             {
+                "contact_id": c.contact_id or "",
                 "full_name": c.full_name,
                 "first_name": c.first_name,
                 "last_name": c.last_name,
@@ -263,6 +282,7 @@ class InvestigationModel(BaseModel):
         return pd.DataFrame(
             rows,
             columns=[
+                "contact_id",
                 "full_name",
                 "first_name",
                 "last_name",
@@ -285,6 +305,9 @@ class InvestigationModel(BaseModel):
                 "status": p.status or "",
                 "author_tokens": "; ".join(p.author_tokens),
                 "corresponding_author": p.corresponding_author or "",
+                "resolved_author_names": "; ".join(p.resolved_author_names),
+                "resolved_author_emails": "; ".join(p.resolved_author_emails),
+                "unresolved_author_tokens": "; ".join(p.unresolved_author_tokens),
             }
             for p in self.publications
         ]
@@ -297,6 +320,9 @@ class InvestigationModel(BaseModel):
                 "status",
                 "author_tokens",
                 "corresponding_author",
+                "resolved_author_names",
+                "resolved_author_emails",
+                "unresolved_author_tokens",
             ],
         )
 
@@ -424,6 +450,10 @@ class SemanticDiagnostics(BaseModel):
     mapped_fields: int = 0
     unknown_fields: int = 0
     ambiguous_fields: int = 0
+    unknown_ratio: float = 0.0
+    ambiguous_ratio: float = 0.0
+    missing_override_fields: list[str] = Field(default_factory=list)
+    strict_violations: list[str] = Field(default_factory=list)
 
 
 class SemanticManifest(BaseModel):
@@ -432,6 +462,27 @@ class SemanticManifest(BaseModel):
     assay_measurement_params: dict[str, list[SemanticField]] = Field(default_factory=dict)
     assay_processing_params: dict[str, list[SemanticField]] = Field(default_factory=dict)
     diagnostics: SemanticDiagnostics = Field(default_factory=SemanticDiagnostics)
+
+
+# ---------------------------------------------------------------------------
+# Dataset validation report models
+# ---------------------------------------------------------------------------
+
+
+class ValidationIssue(BaseModel):
+    code: str
+    level: Literal["error", "warning", "info"]
+    scope: str
+    message: str
+    context: dict[str, Any] = Field(default_factory=dict)
+
+
+class DatasetValidationReport(BaseModel):
+    ok: bool
+    n_errors: int = 0
+    n_warnings: int = 0
+    n_info: int = 0
+    issues: list[ValidationIssue] = Field(default_factory=list)
 
 
 # ---------------------------------------------------------------------------

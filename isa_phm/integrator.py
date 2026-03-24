@@ -11,8 +11,11 @@ from __future__ import annotations
 import csv
 import logging
 import os
+import threading
 from collections import OrderedDict
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from contextlib import contextmanager
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Generator, Literal, cast
 
@@ -34,36 +37,60 @@ REQUESTED_FILE_TYPES: tuple[str, ...] = ("raw", "processed", "auto")
 RESOLVED_FILE_TYPES: tuple[str, ...] = ("raw", "processed")
 
 
+@dataclass(frozen=True)
+class _CSVReadConfig:
+    engine: Literal["c", "python"]
+    sep: str | None
+    encoding: str
+
+
 class _FIFOCache:
     """Simple FIFO eviction cache backed by OrderedDict."""
 
     def __init__(self, maxsize: int = 100) -> None:
         self._maxsize = maxsize
         self._store: OrderedDict = OrderedDict()
+        self._lock = threading.RLock()
 
     def get(self, key: tuple) -> pd.DataFrame | None:
-        return self._store.get(key)
+        with self._lock:
+            return self._store.get(key)
 
     def put(self, key: tuple, df: pd.DataFrame) -> None:
-        if key in self._store:
-            return
-        if len(self._store) >= self._maxsize:
-            self._store.popitem(last=False)
-        self._store[key] = df
+        with self._lock:
+            if key in self._store:
+                return
+            if len(self._store) >= self._maxsize:
+                self._store.popitem(last=False)
+            self._store[key] = df
 
     def clear(self) -> None:
-        self._store.clear()
+        with self._lock:
+            self._store.clear()
 
     def __len__(self) -> int:
-        return len(self._store)
+        with self._lock:
+            return len(self._store)
 
 
 class DataIntegrator:
     """Load and cache ISA-PHM data files as normalized DataFrames."""
 
-    def __init__(self, data_root: Path, cache_maxsize: int = 100) -> None:
+    def __init__(
+        self,
+        data_root: Path,
+        cache_maxsize: int = 100,
+        enable_chunked_large_file_mode: bool = True,
+        large_file_threshold_mb: float = 64.0,
+        chunk_rows: int = 250_000,
+    ) -> None:
         self._data_root = Path(data_root)
         self._cache = _FIFOCache(maxsize=cache_maxsize)
+        self._enable_chunked_large_file_mode = enable_chunked_large_file_mode
+        self._large_file_threshold_mb = max(0.0, float(large_file_threshold_mb))
+        self._chunk_rows = max(1, int(chunk_rows))
+        self._load_lock_guard = threading.Lock()
+        self._load_locks: dict[tuple, threading.Lock] = {}
 
     # ------------------------------------------------------------------
     # Public: single-run loading
@@ -108,29 +135,30 @@ class DataIntegrator:
         )
 
         cache_key = (assay.assay_id, run.run_id, resolved_file_type)
-        cached = self._cache.get(cache_key)
-        if cached is not None:
-            logger.debug("Cache hit: %s", cache_key)
-            return cached, DataLoadMetadata(
+        with self._cache_key_lock(cache_key):
+            cached = self._cache.get(cache_key)
+            if cached is not None:
+                logger.debug("Cache hit: %s", cache_key)
+                return cached, DataLoadMetadata(
+                    assay_id=assay.assay_id,
+                    run_id=run.run_id,
+                    requested_file_type=requested_file_type,
+                    resolved_file_type=resolved_file_type,
+                    file_path=data_file.path,
+                    from_cache=True,
+                )
+
+            df = self._read_csv(Path(data_file.path))
+            self._normalize_time(df, run)
+            self._cache.put(cache_key, df)
+            return df, DataLoadMetadata(
                 assay_id=assay.assay_id,
                 run_id=run.run_id,
                 requested_file_type=requested_file_type,
                 resolved_file_type=resolved_file_type,
                 file_path=data_file.path,
-                from_cache=True,
+                from_cache=False,
             )
-
-        df = self._read_csv(Path(data_file.path))
-        self._normalize_time(df, run)
-        self._cache.put(cache_key, df)
-        return df, DataLoadMetadata(
-            assay_id=assay.assay_id,
-            run_id=run.run_id,
-            requested_file_type=requested_file_type,
-            resolved_file_type=resolved_file_type,
-            file_path=data_file.path,
-            from_cache=False,
-        )
 
     # ------------------------------------------------------------------
     # Public: streaming lifecycle features
@@ -153,12 +181,10 @@ class DataIntegrator:
                     requested_file_type=requested_file_type,
                 )
                 cache_key = (assay.assay_id, run.run_id, resolved_file_type)
-                cached = self._cache.get(cache_key)
-                if cached is not None:
-                    raw_values = self._get_value_column(cached)
-                else:
-                    df = self._read_csv(Path(data_file.path))
-                    raw_values = self._get_value_column(df)
+                raw_values = self._load_values_for_features(
+                    path=Path(data_file.path),
+                    cache_key=cache_key,
+                )
             except DataFileError as exc:
                 logger.warning(
                     "Skipping run '%s' of assay '%s': %s",
@@ -194,12 +220,10 @@ class DataIntegrator:
                 requested_file_type=self._validate_file_type(file_type),
             )
             cache_key = (assay.assay_id, run.run_id, resolved_file_type)
-            cached = self._cache.get(cache_key)
-            if cached is not None:
-                raw_values = self._get_value_column(cached)
-            else:
-                df = self._read_csv(Path(data_file.path))
-                raw_values = self._get_value_column(df)
+            raw_values = self._load_values_for_features(
+                path=Path(data_file.path),
+                cache_key=cache_key,
+            )
         except DataFileError as exc:
             logger.warning(
                 "Skipping run '%s' of assay '%s': %s",
@@ -373,6 +397,47 @@ class DataIntegrator:
 
         df["time"] = t - t0
 
+    @contextmanager
+    def _cache_key_lock(self, cache_key: tuple):
+        """Return a per-cache-key lock to avoid duplicate concurrent file loads."""
+        with self._load_lock_guard:
+            lock = self._load_locks.get(cache_key)
+            if lock is None:
+                lock = threading.Lock()
+                self._load_locks[cache_key] = lock
+        lock.acquire()
+        try:
+            yield
+        finally:
+            lock.release()
+
+    def _should_use_chunked_mode(self, path: Path) -> bool:
+        if not self._enable_chunked_large_file_mode:
+            return False
+        try:
+            size_mb = path.stat().st_size / (1024 * 1024)
+        except OSError:
+            return False
+        return size_mb >= self._large_file_threshold_mb
+
+    def _load_values_for_features(self, path: Path, cache_key: tuple) -> pd.Series:
+        """
+        Load a value series for feature extraction.
+
+        Large files can be streamed in chunks to avoid materializing the full frame.
+        """
+        with self._cache_key_lock(cache_key):
+            cached = self._cache.get(cache_key)
+            if cached is not None:
+                return self._get_value_column(cached)
+
+            if self._should_use_chunked_mode(path):
+                return self._read_values_chunked(path)
+
+            df = self._read_csv(path)
+            self._cache.put(cache_key, df)
+            return self._get_value_column(df)
+
     def _read_csv(self, path: Path) -> pd.DataFrame:
         """Read a 2-column measurement CSV/TSV into [time, value]."""
         if not path.exists():
@@ -382,90 +447,16 @@ class DataIntegrator:
             )
 
         logger.debug("Reading CSV: '%s'.", path)
-        df: pd.DataFrame | None = None
+        read_config = self._detect_csv_read_config(path)
+        try:
+            df = self._read_csv_frame(path, read_config)
+        except Exception as exc:
+            raise DataFileError(
+                f"Failed to read '{path}' as CSV with detected config "
+                f"(engine={read_config.engine}, sep={read_config.sep}, encoding={read_config.encoding}): {exc}"
+            ) from exc
 
-        # Fast path: C engine with explicit common separators.
-        for sep in (",", "\t", ";"):
-            for encoding in ("utf-8", "latin-1"):
-                try:
-                    candidate = pd.read_csv(
-                        path,
-                        sep=sep,
-                        engine="c",
-                        encoding=encoding,
-                        header=None,
-                        dtype=str,
-                        on_bad_lines="warn",
-                    )
-                    if candidate.shape[1] >= 2:
-                        df = candidate
-                        break
-                except UnicodeDecodeError:
-                    continue
-                except Exception:
-                    break
-            if df is not None:
-                break
-
-        # Fallback 1: sniff delimiter once, then retry C engine.
-        if df is None:
-            sniff_sep: str | None = None
-            for encoding in ("utf-8", "latin-1"):
-                try:
-                    sample = path.read_text(encoding=encoding)
-                    sample = sample[:32768]
-                    sniff_sep = csv.Sniffer().sniff(
-                        sample,
-                        delimiters=",\t;| ",
-                    ).delimiter
-                    break
-                except (UnicodeDecodeError, csv.Error, OSError):
-                    continue
-
-            if sniff_sep:
-                for encoding in ("utf-8", "latin-1"):
-                    try:
-                        candidate = pd.read_csv(
-                            path,
-                            sep=sniff_sep,
-                            engine="c",
-                            encoding=encoding,
-                            header=None,
-                            dtype=str,
-                            on_bad_lines="warn",
-                        )
-                        if candidate.shape[1] >= 2:
-                            df = candidate
-                            break
-                    except UnicodeDecodeError:
-                        continue
-                    except Exception:
-                        break
-
-        # Fallback 2: Python engine with auto-detection.
-        if df is None:
-            for encoding in ("utf-8", "latin-1"):
-                try:
-                    df = pd.read_csv(
-                        path,
-                        sep=None,
-                        engine="python",
-                        encoding=encoding,
-                        header=None,
-                        dtype=str,
-                        on_bad_lines="warn",
-                    )
-                    break
-                except UnicodeDecodeError:
-                    continue
-                except Exception as exc:
-                    raise DataFileError(f"Failed to read '{path}' as CSV: {exc}") from exc
-            else:
-                raise DataFileError(
-                    f"Cannot decode '{path}'. Tried UTF-8 and Latin-1."
-                )
-
-        if df is None or df.empty:
+        if df.empty:
             raise DataFileError(f"Data file is empty: '{path}'.")
 
         # Drop header row if first row is non-numeric (e.g. timestamp,value).
@@ -489,6 +480,127 @@ class DataIntegrator:
         df["value"] = pd.to_numeric(df["value"], errors="coerce")
         df["time"] = _to_float_seconds(df["time"])
         return df
+
+    def _read_values_chunked(self, path: Path) -> pd.Series:
+        """Stream only the value column for large files to reduce memory use."""
+        read_config = self._detect_csv_read_config(path)
+        chunks = self._iter_csv_chunks(path, read_config)
+        first_chunk = True
+        warned_extra_cols = False
+        arrays: list[np.ndarray] = []
+
+        for chunk in chunks:
+            if chunk.empty:
+                continue
+            if first_chunk and not _is_numeric_row(chunk.iloc[0]):
+                chunk = chunk.iloc[1:].reset_index(drop=True)
+            first_chunk = False
+            if chunk.empty:
+                continue
+
+            if chunk.shape[1] < 2:
+                raise DataFileError(
+                    f"Data file '{path}' has only {chunk.shape[1]} column(s). "
+                    "ISA-PHM one-column rule requires exactly 2 columns: time + value."
+                )
+            if chunk.shape[1] > 2 and not warned_extra_cols:
+                logger.warning(
+                    "'%s' has %d columns; using second column as value for chunked feature mode.",
+                    path,
+                    chunk.shape[1],
+                )
+                warned_extra_cols = True
+
+            values = pd.to_numeric(chunk.iloc[:, 1], errors="coerce").dropna()
+            if not values.empty:
+                arrays.append(values.to_numpy(dtype=np.float64))
+
+        if not arrays:
+            return pd.Series(dtype=np.float64)
+        if len(arrays) == 1:
+            return pd.Series(arrays[0], dtype=np.float64)
+        return pd.Series(np.concatenate(arrays), dtype=np.float64)
+
+    def _detect_csv_read_config(self, path: Path) -> _CSVReadConfig:
+        """Detect a workable CSV read configuration with a small probe pass."""
+        # Fast path: C engine with explicit common separators.
+        for sep in (",", "\t", ";"):
+            for encoding in ("utf-8", "latin-1"):
+                config = _CSVReadConfig(engine="c", sep=sep, encoding=encoding)
+                if self._probe_csv(path, config):
+                    return config
+
+        # Fallback 1: sniff delimiter once, then retry C engine.
+        sniff_sep = self._sniff_delimiter(path)
+        if sniff_sep:
+            for encoding in ("utf-8", "latin-1"):
+                config = _CSVReadConfig(engine="c", sep=sniff_sep, encoding=encoding)
+                if self._probe_csv(path, config):
+                    return config
+
+        # Fallback 2: Python engine with auto-detection.
+        for encoding in ("utf-8", "latin-1"):
+            config = _CSVReadConfig(engine="python", sep=None, encoding=encoding)
+            if self._probe_csv(path, config):
+                return config
+
+        raise DataFileError(f"Cannot decode '{path}'. Tried UTF-8 and Latin-1.")
+
+    @staticmethod
+    def _sniff_delimiter(path: Path) -> str | None:
+        for encoding in ("utf-8", "latin-1"):
+            try:
+                with path.open("rb") as fh:
+                    sample_raw = fh.read(32768)
+                sample = sample_raw.decode(encoding, errors="strict")
+                if not sample.strip():
+                    continue
+                return csv.Sniffer().sniff(sample, delimiters=",\t;| ").delimiter
+            except (UnicodeDecodeError, csv.Error, OSError):
+                continue
+        return None
+
+    def _probe_csv(self, path: Path, config: _CSVReadConfig) -> bool:
+        try:
+            probe = self._read_csv_frame(path, config, nrows=8)
+            return probe.shape[1] >= 2
+        except UnicodeDecodeError:
+            return False
+        except Exception:
+            return False
+
+    @staticmethod
+    def _read_csv_frame(
+        path: Path,
+        config: _CSVReadConfig,
+        nrows: int | None = None,
+    ) -> pd.DataFrame:
+        return pd.read_csv(
+            path,
+            sep=config.sep,
+            engine=config.engine,
+            encoding=config.encoding,
+            header=None,
+            dtype=str,
+            on_bad_lines="warn",
+            nrows=nrows,
+        )
+
+    def _iter_csv_chunks(
+        self,
+        path: Path,
+        config: _CSVReadConfig,
+    ):
+        return pd.read_csv(
+            path,
+            sep=config.sep,
+            engine=config.engine,
+            encoding=config.encoding,
+            header=None,
+            dtype=str,
+            on_bad_lines="warn",
+            chunksize=self._chunk_rows,
+        )
 
     @staticmethod
     def _get_value_column(df: pd.DataFrame) -> pd.Series:

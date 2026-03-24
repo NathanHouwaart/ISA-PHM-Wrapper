@@ -319,3 +319,41 @@ class TestConcurrentLoads:
         assert all(r[0] > 0 for r in results)
         assert all(r[1] == ["time", "value"] for r in results)
         assert all(r[2] == "processed" for r in results)
+        assert len(integrator._cache) == 1
+
+
+# ---------------------------------------------------------------------------
+# Large-file chunked mode
+# ---------------------------------------------------------------------------
+
+class TestLargeFileChunkedMode:
+    def test_chunked_lifecycle_features_match_non_chunked(
+        self, minimal_multi_run_isa_file, tmp_csv_dir
+    ):
+        raw = ISAParser(strict=False).load(minimal_multi_run_isa_file)
+        inv = _make_investigation(raw, tmp_csv_dir)
+        study = inv.studies[0]
+        assay = study.assays[0]
+
+        baseline = DataIntegrator(
+            data_root=tmp_csv_dir,
+            cache_maxsize=5,
+            enable_chunked_large_file_mode=False,
+        ).lifecycle_features_df(assay, study_id=study.study_id, n_workers=1)
+
+        chunked = DataIntegrator(
+            data_root=tmp_csv_dir,
+            cache_maxsize=5,
+            enable_chunked_large_file_mode=True,
+            large_file_threshold_mb=0.0,  # force chunk mode for test files
+            chunk_rows=64,
+        ).lifecycle_features_df(assay, study_id=study.study_id, n_workers=1)
+
+        assert list(chunked["run_id"]) == list(baseline["run_id"])
+        for feat in FEATURE_NAMES:
+            np.testing.assert_allclose(
+                chunked[feat].to_numpy(dtype=float),
+                baseline[feat].to_numpy(dtype=float),
+                rtol=1e-10,
+                atol=1e-12,
+            )

@@ -67,6 +67,12 @@ class ISAWrapper:
         Set to False to skip isatools check (e.g., when isatools is not installed).
     cache_maxsize : int
         Maximum DataFrames held in the DataIntegrator's FIFO cache (default 100).
+    enable_chunked_large_file_mode : bool
+        Enable chunked CSV reading for lifecycle feature extraction on large files.
+    large_file_threshold_mb : float
+        Minimum file size (MB) that triggers chunked large-file mode.
+    chunk_rows : int
+        Number of rows per chunk when large-file mode is active.
     plot_config : PlotConfig | None
         Optional style overrides passed to ISAPlotter.
     semantic_config_path : str | Path | None
@@ -80,6 +86,9 @@ class ISAWrapper:
         auto_fix: bool = True,
         strict_validation: bool = True,
         cache_maxsize: int = 100,
+        enable_chunked_large_file_mode: bool = True,
+        large_file_threshold_mb: float = 64.0,
+        chunk_rows: int = 250_000,
         plot_config: PlotConfig | None = None,
         semantic_config_path: str | Path | None = None,
     ) -> None:
@@ -108,7 +117,13 @@ class ISAWrapper:
         investigation = extractor.extract(repaired)
 
         # --- Step 4: Wire integrator + plotter + proxy layer ---
-        integrator = DataIntegrator(data_root=data_root, cache_maxsize=cache_maxsize)
+        integrator = DataIntegrator(
+            data_root=data_root,
+            cache_maxsize=cache_maxsize,
+            enable_chunked_large_file_mode=enable_chunked_large_file_mode,
+            large_file_threshold_mb=large_file_threshold_mb,
+            chunk_rows=chunk_rows,
+        )
         plotter = ISAPlotter(config=plot_config)
         semantic = SemanticNormalizer(override_config_path=semantic_config_path)
         navigator = QueryNavigator(investigation, integrator, plotter, semantic=semantic)

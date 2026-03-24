@@ -12,6 +12,51 @@ Quick start::
 """
 
 from .wrapper import ISAWrapper
+from .plotter import ISAPlotter, PlotConfig
+from .semantic import SemanticNormalizer
+from .schemas import (
+    DataLoadMetadata,
+    PublicationModel,
+    SemanticDiagnostics,
+    SemanticField,
+    SemanticManifest,
+)
+from .errors import (
+    ISAPHMError,
+    ParseError,
+    ValidationError,
+    PreprocessingError,
+    ExtractionError,
+    DataFileError,
+    StudyNotFoundError,
+    AssayNotFoundError,
+    RunNotFoundError,
+    AmbiguousRunError,
+    PlotError,
+    ExportError,
+)
 
-__all__ = ["ISAWrapper"]
+__all__ = [
+    "ISAWrapper",
+    "ISAPlotter",
+    "PlotConfig",
+    "SemanticNormalizer",
+    "DataLoadMetadata",
+    "PublicationModel",
+    "SemanticField",
+    "SemanticDiagnostics",
+    "SemanticManifest",
+    "ISAPHMError",
+    "ParseError",
+    "ValidationError",
+    "PreprocessingError",
+    "ExtractionError",
+    "DataFileError",
+    "StudyNotFoundError",
+    "AssayNotFoundError",
+    "RunNotFoundError",
+    "AmbiguousRunError",
+    "PlotError",
+    "ExportError",
+]
 __version__ = "0.1.0"

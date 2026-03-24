@@ -1,13 +1,13 @@
-"""
-Fluent proxy layer — AD-2 primary API for ISA-PHM datasets.
+﻿"""
+Fluent proxy layer â€” AD-2 primary API for ISA-PHM datasets.
 
 Hierarchy
 ---------
 ISAWrapper
-    └── QueryNavigator              (investigation-level)
-            └── StudyProxy          (study-level)
-                    └── AssayProxy  (assay/sensor-level)
-                            └── RunProxy   (single-run level)
+    â””â”€â”€ QueryNavigator              (investigation-level)
+            â””â”€â”€ StudyProxy          (study-level)
+                    â””â”€â”€ AssayProxy  (assay/sensor-level)
+                            â””â”€â”€ RunProxy   (single-run level)
 
 Entry point::
 
@@ -19,13 +19,15 @@ Entry point::
 from __future__ import annotations
 
 import logging
-from typing import TYPE_CHECKING
+import re
+from typing import TYPE_CHECKING, Literal
 
 import pandas as pd
 
 from .errors import (
     AmbiguousRunError,
     AssayNotFoundError,
+    DataFileError,
     PlotError,
     RunNotFoundError,
     StudyNotFoundError,
@@ -34,12 +36,15 @@ from .schemas import (
     AssayModel,
     AssayOverview,
     AssaySummary,
+    DataLoadMetadata,
     InvestigationModel,
     InvestigationOverview,
     MissingValuesReport,
     RunOverview,
     RunRecord,
     RunSummary,
+    SemanticField,
+    SemanticManifest,
     StudyModel,
     StudyOverview,
     StudySummary,
@@ -48,8 +53,10 @@ from .schemas import (
 if TYPE_CHECKING:
     from .integrator import DataIntegrator
     from .plotter import ISAPlotter
+    from .semantic import SemanticNormalizer
 
 logger = logging.getLogger("isa_phm")
+_FAULT_TYPE_RE = re.compile(r"\b(fault|damage|rul|defect|degradation)\b", re.IGNORECASE)
 
 
 # ---------------------------------------------------------------------------
@@ -74,10 +81,14 @@ class QueryNavigator:
         investigation: InvestigationModel,
         integrator: "DataIntegrator",
         plotter: "ISAPlotter",
+        semantic: "SemanticNormalizer | None" = None,
     ) -> None:
+        from .semantic import SemanticNormalizer
+
         self._inv = investigation
         self._integrator = integrator
         self._plotter = plotter
+        self._semantic = semantic or SemanticNormalizer()
 
         # Build lookup indices.
         self._by_uuid: dict[str, StudyModel] = {}
@@ -132,12 +143,12 @@ class QueryNavigator:
         # Exact UUID match.
         s = self._by_uuid.get(study_id)
         if s:
-            return StudyProxy(s, self._inv, self._integrator, self._plotter)
+            return StudyProxy(s, self._inv, self._integrator, self._plotter, self._semantic)
 
         # Case-insensitive title match.
         s = self._by_title_lower.get(study_id.strip().lower())
         if s:
-            return StudyProxy(s, self._inv, self._integrator, self._plotter)
+            return StudyProxy(s, self._inv, self._integrator, self._plotter, self._semantic)
 
         available = sorted(self._by_title_lower.keys())
         raise StudyNotFoundError(
@@ -163,16 +174,33 @@ class StudyProxy:
         investigation: InvestigationModel,
         integrator: "DataIntegrator",
         plotter: "ISAPlotter",
+        semantic: "SemanticNormalizer",
     ) -> None:
         self._study = study
         self._inv = investigation
         self._integrator = integrator
         self._plotter = plotter
+        self._semantic = semantic
 
         # Assay lookup by filename (assay_id).
         self._assay_by_id: dict[str, AssayModel] = {
             a.assay_id: a for a in study.assays
         }
+        self._assay_proxy_cache: dict[str, AssayProxy] = {}
+
+    def _assay_proxy(self, assay_model: AssayModel) -> "AssayProxy":
+        proxy = self._assay_proxy_cache.get(assay_model.assay_id)
+        if proxy is None:
+            proxy = AssayProxy(
+                assay_model,
+                self._study,
+                self._inv,
+                self._integrator,
+                self._plotter,
+                self._semantic,
+            )
+            self._assay_proxy_cache[assay_model.assay_id] = proxy
+        return proxy
 
     @property
     def has_runs(self) -> bool:
@@ -232,145 +260,176 @@ class StudyProxy:
         """Return the factors defined for this study."""
         return self.overview().factors
 
-    def variable_overview(self) -> "list[pd.DataFrame]":
+    def semantic_factors(self) -> list[SemanticField]:
+        """Return normalized semantic labels for this study's factors."""
+        return self._semantic.normalize_study_factors(self._study)
+
+    def variable_overview(self) -> list[pd.DataFrame]:
         """
-        Return one DataFrame per unique set of factor values found across all
-        assay runs in this study.
+        Return a list of DataFrames â€” one per unique experimental condition.
 
         Each DataFrame has two columns:
+            variable â€” factor name
+            value    â€” factor value for that condition
 
-        * ``variable`` — factor name
-        * ``value``    — factor value for that condition
+        For a single-condition diagnostic study this returns a list with one
+        element; for a multi-condition study each element represents a distinct
+        operating point or fault configuration.
 
-        For a single-condition study (all sensors share the same operating
-        point) a list with one DataFrame is returned.  For multi-condition
-        studies (e.g. prognostic datasets where the load or speed varies
-        between runs) each distinct condition produces its own DataFrame so
-        that different values are never mixed on the same table.
+        Returns
+        -------
+        list[pd.DataFrame]
         """
-        seen: list[dict] = []
-        result: list[pd.DataFrame] = []
+        seen_keys: list[tuple] = []
+        seen_dicts: list[dict] = []
         for assay in self._study.assays:
             for run in assay.runs:
-                fv = run.factor_values
-                if fv not in seen:
-                    seen.append(fv)
-                    result.append(
-                        pd.DataFrame(
-                            [{"variable": k, "value": v} for k, v in fv.items()]
-                        )
-                    )
-        return result
+                key = tuple(sorted(run.factor_values.items()))
+                if key not in seen_keys:
+                    seen_keys.append(key)
+                    seen_dicts.append(dict(run.factor_values))
 
-    # ------------------------------------------------------------------
-    # Test matrix helpers
-    # ------------------------------------------------------------------
+        if not seen_dicts:
+            return [pd.DataFrame(columns=["variable", "value"])]
 
-    _FAULT_KEYWORDS: "tuple[str, ...]" = ("fault", "damage", "rul")
+        return [
+            pd.DataFrame(
+                [{"variable": k, "value": v} for k, v in fv_dict.items()],
+                columns=["variable", "value"],
+            )
+            for fv_dict in seen_dicts
+        ]
 
-    def _build_test_matrix(self, type_filter: "str | None" = None) -> pd.DataFrame:
+    def test_matrix(self) -> pd.DataFrame:
         """
-        Core pivot builder shared by :meth:`test_matrix`, :meth:`operating_conditions`,
-        and :meth:`fault_conditions`.
+        Return a compact factor-by-condition pivot table.
 
-        Rows = one per factor.  Left columns = ``variable``, ``type``, ``unit``.
-        Right columns = one per unique experimental condition found across all
-        assay runs; each column is labelled ``Condition 1``, ``Condition 2``, …
-        (or just ``Value`` when there is only a single condition).
+        Each row is one study factor; the first three columns are:
 
-        Parameters
-        ----------
-        type_filter : None | "fault" | "operating"
-            When not *None*, only factors whose ``factor_type`` matches the
-            filter are included.
+        ``variable`` â€” factor name |
+        ``type``     â€” factor type annotation (e.g. "Operating condition") |
+        ``unit``     â€” unit string (empty when not specified)
+
+        Additional columns hold the factor value for each unique experimental
+        condition observed in the dataset.  When only a single condition
+        exists the data column is named ``"Value"``; for multiple conditions
+        they are labelled ``"Condition 1"``, ``"Condition 2"``, and so on.
+
+        Returns
+        -------
+        pd.DataFrame
         """
-        # 1. Collect unique factor-value dicts (preserving first-seen order)
-        seen: list[dict] = []
+        if not self._study.factors:
+            return pd.DataFrame(columns=["variable", "type", "unit"])
+
+        # Collect unique factor-value dicts in order of first appearance.
+        seen_keys: list[tuple] = []
+        conditions: list[dict] = []
         for assay in self._study.assays:
             for run in assay.runs:
-                fv = dict(run.factor_values)
-                if fv not in seen:
-                    seen.append(fv)
+                key = tuple(sorted(run.factor_values.items()))
+                if key not in seen_keys:
+                    seen_keys.append(key)
+                    conditions.append(dict(run.factor_values))
 
-        # Column labels for each unique condition
-        if len(seen) == 1:
-            cond_labels = ["Value"]
-        else:
-            cond_labels = [f"Condition {i + 1}" for i in range(len(seen))]
-
-        # 2. Sort factors: fault specs first, operating conditions second
-        def _sort_key(f: "FactorModel") -> int:  # type: ignore[name-defined]
-            return 0 if any(k in f.factor_type.lower() for k in self._FAULT_KEYWORDS) else 1
-
-        factors = sorted(self._study.factors, key=_sort_key)
-
-        # 3. Apply type filter
-        if type_filter == "operating":
-            factors = [f for f in factors if "operating condition" in f.factor_type.lower()]
-        elif type_filter == "fault":
-            factors = [f for f in factors if any(k in f.factor_type.lower() for k in self._FAULT_KEYWORDS)]
-
-        if not factors:
-            return pd.DataFrame(columns=["variable", "type", "unit"] + cond_labels)
-
-        # 4. Build one row per factor
         rows = []
-        for f in factors:
+        for factor in self._study.factors:
             row: dict = {
-                "variable": f.factor_name,
-                "type": f.factor_type,
-                "unit": f.unit or "",
+                "variable": factor.factor_name,
+                "type":     factor.factor_type,
+                "unit":     factor.unit or "",
             }
-            for label, cond in zip(cond_labels, seen):
-                row[label] = cond.get(f.factor_name, "")
+            if len(conditions) == 1:
+                row["Value"] = conditions[0].get(factor.factor_name, "")
+            else:
+                for i, cond in enumerate(conditions, 1):
+                    row[f"Condition {i}"] = cond.get(factor.factor_name, "")
             rows.append(row)
 
         return pd.DataFrame(rows)
 
-    def test_matrix(self) -> pd.DataFrame:
-        """
-        Return a pivot table matching the ISA-PHM-Wizard test matrix view.
-
-        Rows: one per study factor; fault specifications first, then operating
-        conditions (matching the wizard's visual grouping).
-
-        Columns:
-
-        * ``variable`` — factor name
-        * ``type``     — factor type (e.g. "Quantitative fault specification")
-        * ``unit``     — unit, or empty string when not specified
-        * ``Value`` / ``Condition 1``, ``Condition 2``, … — one column per
-          unique experimental condition found across all assay runs.
-
-        For a single-condition diagnostic study the table has exactly one
-        value column (``Value``).  For a multi-condition prognostic study
-        each distinct operating point gets its own column.
-        """
-        return self._build_test_matrix()
-
     def operating_conditions(self) -> pd.DataFrame:
         """
-        Return the test-matrix rows whose factor type is ``Operating condition``.
+        Subset of :py:meth:`test_matrix` containing only operating-condition factors.
 
-        Same pivot layout as :meth:`test_matrix` but restricted to operating
-        condition factors.  Useful for a quick overview of the experimental
-        operating point(s) without fault-severity information mixed in.
+        Returns an empty DataFrame (with correct columns) when no operating
+        condition factors are defined.
         """
-        return self._build_test_matrix(type_filter="operating")
+        df = self.test_matrix()
+        if df.empty:
+            return df
+        mask = df["type"].str.lower().str.contains("operating condition", na=False)
+        return df[mask].reset_index(drop=True)
 
     def fault_conditions(self) -> pd.DataFrame:
         """
-        Return the test-matrix rows whose factor type is a fault specification.
+        Subset of :py:meth:`test_matrix` containing only fault-specification factors.
 
-        Covers ``Quantitative fault specification``, ``Qualitative fault
-        specification``, ``Damage``, ``RUL``, and similar fault-related types.
-        Same pivot layout as :meth:`test_matrix`.
+        Matches factor types whose annotation contains any of:
+        ``fault``, ``damage``, ``rul``, ``defect``, ``degradation``.
+
+        Returns an empty DataFrame (with correct columns) when no fault factors
+        are defined.
         """
-        return self._build_test_matrix(type_filter="fault")
+        df = self.test_matrix()
+        if df.empty:
+            return df
+        mask = df["type"].fillna("").apply(lambda t: bool(_FAULT_TYPE_RE.search(str(t))))
+        return df[mask].reset_index(drop=True)
+
+    def get_fault_labels(self, assay_id: str | None = None) -> pd.DataFrame:
+        """
+        Return fault-related factor values for every (assay, run) pair.
+
+        Useful for building labelled training datasets from fault-degradation
+        experiments.
+
+        Parameters
+        ----------
+        assay_id : str | None
+            When provided, only include assays whose ``assay_id`` contains
+            this string (case-sensitive substring match).
+
+        Returns
+        -------
+        pd.DataFrame
+            Columns: ``assay_id``, ``run_id``, ``run_number``,
+            plus one column per fault-related factor.
+            Returns an empty DataFrame with correct columns when no fault
+            factors are defined.
+        """
+        fault_factor_names = [
+            f.factor_name
+            for f in self._study.factors
+            if _FAULT_TYPE_RE.search(f.factor_type or "")
+        ]
+        base_cols = ["assay_id", "run_id", "run_number"]
+        all_cols = base_cols + fault_factor_names
+
+        if not fault_factor_names:
+            return pd.DataFrame(columns=base_cols)
+
+        rows = []
+        for assay in self._study.assays:
+            if assay_id is not None and assay_id not in assay.assay_id:
+                continue
+            for run in assay.runs:
+                row: dict = {
+                    "assay_id":   assay.assay_id,
+                    "run_id":     run.run_id,
+                    "run_number": run.run_number,
+                }
+                for fname in fault_factor_names:
+                    row[fname] = run.factor_values.get(fname)
+                rows.append(row)
+
+        if not rows:
+            return pd.DataFrame(columns=all_cols)
+        return pd.DataFrame(rows, columns=all_cols)
 
     def plot_sensor_boxplot(
         self,
-        file_type: str = "raw",
+        file_type: Literal["raw", "processed", "auto"] = "raw",
         outlier_method: str = "fixed",
         outlier_upper: "float | None" = None,
         outlier_lower: "float | None" = None,
@@ -382,7 +441,7 @@ class StudyProxy:
         Interactive Bokeh boxplot comparing amplitude across all sensor channels.
 
         Computes box statistics (Q1, median, Q3, whiskers, mean) for each sensor
-        one at a time — only summary stats are kept in memory, not raw arrays.
+        one at a time â€” only summary stats are kept in memory, not raw arrays.
         Returns a ``bokeh.plotting.figure`` that can be shown with::
 
             from bokeh.plotting import show
@@ -390,7 +449,7 @@ class StudyProxy:
 
         Parameters
         ----------
-        file_type : "raw" | "processed"
+        file_type : "raw" | "processed" | "auto"
         outlier_method : "iqr" | "zscore" | "fixed"
         outlier_upper : float | None
             Hard upper bound, e.g. ``1e7`` to exclude hardware overflow values.
@@ -426,7 +485,7 @@ class StudyProxy:
 
         for summary in self.list_assays():
             a_model = self._assay_by_id[summary.assay_id]
-            a = AssayProxy(a_model, self._study, self._inv, self._integrator, self._plotter)
+            a = self._assay_proxy(a_model)
             if unit is None:
                 unit = a._infer_unit()
             try:
@@ -451,7 +510,7 @@ class StudyProxy:
                 uppers.append(min(float(vals.max()), q3 + 1.5 * iqr))
                 lowers.append(max(float(vals.min()), q1 - 1.5 * iqr))
                 del df, df_clean, vals
-            except Exception as exc:  # noqa: BLE001
+            except (DataFileError, PlotError, ValueError) as exc:
                 logger.warning("Skipping sensor '%s': %s", summary.sensor_alias, exc)
 
         source = ColumnDataSource(dict(
@@ -499,6 +558,179 @@ class StudyProxy:
         p.legend.location = "top_right"
         return p
 
+    def sensor_catalog(self) -> pd.DataFrame:
+        """
+        Return a DataFrame with one row per sensor channel (assay) in this study.
+
+        Columns: assay_id, sensor_alias, measurement_type, technology_type,
+                 technology_platform, n_runs, n_raw_files, n_processed_files,
+                 fs_hz (when inferrable), unit (when inferrable).
+
+        Returns
+        -------
+        pd.DataFrame
+        """
+        rows = []
+        for a_model in self._study.assays:
+            a = self._assay_proxy(a_model)
+            row: dict = {
+                "assay_id": a_model.assay_id,
+                "sensor_alias": a_model.sensor.alias,
+                "measurement_type": a_model.sensor.measurement_type,
+                "technology_type": a_model.sensor.technology_type,
+                "technology_platform": a_model.sensor.technology_platform,
+                "n_runs": len(a_model.runs),
+                "n_raw_files": len([r for r in a_model.runs if r.raw_file and r.raw_file.path]),
+                "n_processed_files": len(
+                    [r for r in a_model.runs if r.processed_file and r.processed_file.path]
+                ),
+            }
+            fs = a._infer_fs()
+            if fs is not None:
+                row["fs_hz"] = fs
+            unit = a._infer_unit()
+            if unit is not None:
+                row["unit"] = unit
+            rows.append(row)
+        return pd.DataFrame(rows)
+
+    def export_labeled_dataset(
+        self,
+        file_type: Literal["raw", "processed", "auto"] = "raw",
+        sensors: "list[str] | None" = None,
+        outlier_method: "str | None" = None,
+        outlier_upper: "float | None" = None,
+        outlier_lower: "float | None" = None,
+        outlier_strategy: str = "drop",
+    ) -> pd.DataFrame:
+        """
+        Export all sensor time series annotated with ISA-PHM metadata labels.
+
+        Every row of the returned DataFrame is one sample, tagged with its
+        sensor identity and experimental condition â€” ready for ML pipelines.
+
+        Columns: time, value, assay_id, sensor_alias, measurement_type,
+                 run_id, run_number, <factor_name>â€¦
+
+        Parameters
+        ----------
+        file_type : "raw" | "processed" | "auto"
+        sensors : list[str] | None
+            Sensor aliases to include.  Defaults to all assays in the study.
+        outlier_method : "iqr" | "zscore" | "fixed" | None
+            When set, outlier correction is applied before export.
+        outlier_upper : float | None
+        outlier_lower : float | None
+        outlier_strategy : "clip" | "nan" | "drop"
+
+        Returns
+        -------
+        pd.DataFrame
+        """
+        target_assays = [
+            a for a in self._study.assays
+            if sensors is None or a.sensor.alias in sensors
+        ]
+        frames: list[pd.DataFrame] = []
+        for a_model in target_assays:
+            a = self._assay_proxy(a_model)
+            for run in a_model.runs:
+                try:
+                    df = self._integrator.load(
+                        a_model,
+                        study_id=self._study.study_id,
+                        run_id=run.run_id,
+                        file_type=file_type,
+                    )
+                except DataFileError as exc:
+                    logger.warning(
+                        "export_labeled_dataset: skipping assay '%s' run '%s': %s",
+                        a_model.assay_id, run.run_id, exc,
+                    )
+                    continue
+                if outlier_method is not None:
+                    df = a.fix_outliers(
+                        df,
+                        method=outlier_method,
+                        upper=outlier_upper,
+                        lower=outlier_lower,
+                        strategy=outlier_strategy,
+                    )
+                df = df.copy()
+                df["assay_id"] = a_model.assay_id
+                df["sensor_alias"] = a_model.sensor.alias
+                df["measurement_type"] = a_model.sensor.measurement_type
+                df["run_id"] = run.run_id
+                df["run_number"] = run.run_number
+                for factor_name, factor_val in run.factor_values.items():
+                    df[factor_name] = factor_val
+                frames.append(df)
+        if not frames:
+            return pd.DataFrame()
+        return pd.concat(frames, ignore_index=True)
+
+    def load_multi_sensor_dataframe(
+        self,
+        sensors: "list[str] | None" = None,
+        file_type: Literal["raw", "processed", "auto"] = "raw",
+        run_id: "str | None" = None,
+    ) -> pd.DataFrame:
+        """
+        Load multiple sensor channels and time-align them into a wide DataFrame.
+
+        For single-run assays ``run_id`` may be omitted.  For multi-run assays
+        an explicit ``run_id`` is required when there is more than one run.
+
+        Columns: time, <sensor_alias_1>, <sensor_alias_2>, â€¦
+
+        The merge uses a nearest-neighbour join on ``time`` so sensors sampled
+        at slightly different instants can still be aligned.
+
+        Parameters
+        ----------
+        sensors : list[str] | None
+            Sensor aliases to include.  Defaults to all assays in the study.
+        file_type : "raw" | "processed" | "auto"
+        run_id : str | None
+            Run identifier for multi-run assays.
+
+        Returns
+        -------
+        pd.DataFrame  Wide format: time + one column per sensor alias.
+        """
+        target_assays = [
+            a for a in self._study.assays
+            if sensors is None or a.sensor.alias in sensors
+        ]
+        dfs: list[tuple[str, pd.DataFrame]] = []
+        for a_model in target_assays:
+            try:
+                df = self._integrator.load(
+                    a_model,
+                    study_id=self._study.study_id,
+                    run_id=run_id,
+                    file_type=file_type,
+                )
+                alias = a_model.sensor.alias
+                dfs.append((alias, df[["time", "value"]].rename(columns={"value": alias})))
+            except (DataFileError, AmbiguousRunError, RunNotFoundError) as exc:
+                logger.warning(
+                    "load_multi_sensor_dataframe: skipping '%s': %s",
+                    a_model.assay_id, exc,
+                )
+        if not dfs:
+            return pd.DataFrame()
+        if len(dfs) == 1:
+            alias, df = dfs[0]
+            return df
+        # Nearest-neighbour time merge across all sensor channels.
+        _, merged = dfs[0]
+        merged = merged.sort_values("time").reset_index(drop=True)
+        for _, df in dfs[1:]:
+            df = df.sort_values("time").reset_index(drop=True)
+            merged = pd.merge_asof(merged, df, on="time", direction="nearest")
+        return merged
+
     def assay(self, assay_id: str) -> "AssayProxy":
         """
         Navigate into a specific assay by filename / assay_id.
@@ -527,7 +759,7 @@ class StudyProxy:
                 f"Assay '{assay_id}' not found in study '{self._study.title}'. "
                 f"Available assay IDs: {available}"
             )
-        return AssayProxy(a, self._study, self._inv, self._integrator, self._plotter)
+        return self._assay_proxy(a)
 
 
 # ---------------------------------------------------------------------------
@@ -539,7 +771,7 @@ class AssayProxy:
     Assay (sensor channel) level proxy.
 
     Provides data loading, lifecycle feature computation, and all six plots.
-    Acquire via: ``wrapper.study("…").assay("a_st01_se01")``
+    Acquire via: ``wrapper.study("â€¦").assay("a_st01_se01")``
     """
 
     def __init__(
@@ -549,12 +781,14 @@ class AssayProxy:
         investigation: InvestigationModel,
         integrator: "DataIntegrator",
         plotter: "ISAPlotter",
+        semantic: "SemanticNormalizer",
     ) -> None:
         self._assay = assay
         self._study = study
         self._inv = investigation
         self._integrator = integrator
         self._plotter = plotter
+        self._semantic = semantic
 
     # ------------------------------------------------------------------
     # Informational
@@ -599,6 +833,50 @@ class AssayProxy:
         """Return a summary row per run."""
         return self.overview().runs
 
+    def list_measurement_params(self, run_id: str | None = None) -> pd.DataFrame:
+        """
+        Return the measurement protocol parameters for a run as a DataFrame.
+
+        Columns: ``parameter_name``, ``value``, ``unit``.
+
+        Uses the first run when ``run_id`` is omitted.  Returns an empty
+        DataFrame (with correct columns) when no parameters are defined.
+        """
+        run = self._first_or_run(run_id)
+        if run is None or not run.measurement_params:
+            return pd.DataFrame(columns=["parameter_name", "value", "unit"])
+        rows = [
+            {"parameter_name": pv.parameter_name, "value": pv.value, "unit": pv.unit or ""}
+            for pv in run.measurement_params
+        ]
+        return pd.DataFrame(rows, columns=["parameter_name", "value", "unit"])
+
+    def list_processing_params(self, run_id: str | None = None) -> pd.DataFrame:
+        """
+        Return the processing protocol parameters for a run as a DataFrame.
+
+        Columns: ``parameter_name``, ``value``, ``unit``.
+
+        Uses the first run when ``run_id`` is omitted.  Returns an empty
+        DataFrame (with correct columns) when no parameters are defined.
+        """
+        run = self._first_or_run(run_id)
+        if run is None or not run.processing_params:
+            return pd.DataFrame(columns=["parameter_name", "value", "unit"])
+        rows = [
+            {"parameter_name": pv.parameter_name, "value": pv.value, "unit": pv.unit or ""}
+            for pv in run.processing_params
+        ]
+        return pd.DataFrame(rows, columns=["parameter_name", "value", "unit"])
+
+    def semantic_parameters(
+        self,
+        run_id: str | None = None,
+    ) -> dict[str, list[SemanticField]]:
+        """Return normalized semantic labels for measurement/processing parameters."""
+        run = self._first_or_run(run_id)
+        return self._semantic.normalize_assay_parameters(self._assay, run=run)
+
     def columns(self) -> list[str]:
         """Return the standard DataFrame column names produced by load_dataframe()."""
         from .integrator import STANDARD_COLUMNS
@@ -612,7 +890,7 @@ class AssayProxy:
     def load_dataframe(
         self,
         run_id: str | None = None,
-        file_type: str = "processed",
+        file_type: Literal["raw", "processed", "auto"] = "processed",
     ) -> pd.DataFrame:
         """
         Load a run's measurement file into a DataFrame.
@@ -623,12 +901,9 @@ class AssayProxy:
         ----------
         run_id : str | None
             Run identifier.  Omit for single-run (diagnostic) assays.
-        file_type : "processed" | "raw"
+        file_type : "processed" | "raw" | "auto"
             Which data file to load.  Defaults to ``"processed"``.
-            If the requested type is not available in the ISA-JSON, the other
-            type is used automatically and a warning is logged.
-            Pass ``file_type="raw"`` explicitly when the ISA-JSON only records
-            raw measurement files (common for diagnostic datasets).
+            Use ``"auto"`` to prefer processed and fall back to raw.
 
         Returns
         -------
@@ -636,9 +911,9 @@ class AssayProxy:
 
         Raises
         ------
-        AmbiguousRunError   — multi-run assay and run_id is None.
-        RunNotFoundError    — explicit run_id not present.
-        DataFileError       — file missing or unreadable (neither raw nor processed available).
+        AmbiguousRunError   â€” multi-run assay and run_id is None.
+        RunNotFoundError    â€” explicit run_id not present.
+        DataFileError       â€” file missing or unreadable (neither raw nor processed available).
         """
         return self._integrator.load(
             self._assay,
@@ -647,13 +922,26 @@ class AssayProxy:
             file_type=file_type,
         )
 
-    def lifecycle_features(self, file_type: str = "processed", n_workers: int | None = None) -> pd.DataFrame:
+    def load_dataframe_with_meta(
+        self,
+        run_id: str | None = None,
+        file_type: Literal["raw", "processed", "auto"] = "processed",
+    ) -> tuple[pd.DataFrame, DataLoadMetadata]:
+        """Load data and return DataFrame plus resolved file-load metadata."""
+        return self._integrator.load_with_meta(
+            self._assay,
+            study_id=self._study.study_id,
+            run_id=run_id,
+            file_type=file_type,
+        )
+
+    def lifecycle_features(self, file_type: Literal["raw", "processed", "auto"] = "processed", n_workers: int | None = None) -> pd.DataFrame:
         """
         Compute scalar features for every run (parallel CSV loading for speed).
 
         Parameters
         ----------
-        file_type : "processed" | "raw"
+        file_type : "processed" | "raw" | "auto"
         n_workers : int | None
             Number of threads.  None = auto (min(32, cpu_count+4)).  1 = sequential.
 
@@ -662,7 +950,7 @@ class AssayProxy:
         pd.DataFrame with columns:
             run_id, run_number, study_id, assay_id,
             rms, max, mean, peak2peak, kurtosis, std, crest_factor, skewness,
-            fv_<factor_name>…
+            fv_<factor_name>â€¦
         """
         return self._integrator.lifecycle_features_df(
             self._assay, study_id=self._study.study_id, file_type=file_type, n_workers=n_workers
@@ -675,7 +963,7 @@ class AssayProxy:
     def missing_values_report(
         self,
         run_id: str | None = None,
-        file_type: str = "processed",
+        file_type: Literal["raw", "processed", "auto"] = "processed",
     ) -> MissingValuesReport:
         """
         Return a textual report of missing / NaN values.
@@ -727,7 +1015,7 @@ class AssayProxy:
         run_id: str | None = None,
         column: str = "value",
         bins: int = 50,
-        file_type: str = "processed",
+        file_type: Literal["raw", "processed", "auto"] = "processed",
     ) -> object:
         """
         Amplitude histogram + KDE for one run.
@@ -741,7 +1029,7 @@ class AssayProxy:
         run_id : str | None
         column : str
         bins : int
-        file_type : "processed" | "raw"
+        file_type : "processed" | "raw" | "auto"
         """
         if df is None:
             df = self.load_dataframe(run_id=run_id, file_type=file_type)
@@ -750,17 +1038,17 @@ class AssayProxy:
             df,
             column=column,
             bins=bins,
-            title=f"{self._assay.assay_id} / {label} — Distribution of '{column}'",
+            title=f"{self._assay.assay_id} / {label} â€” Distribution of '{column}'",
         )
 
     def plot_lifecycle(
         self,
         feature: str = "rms",
-        file_type: str = "processed",
+        file_type: Literal["raw", "processed", "auto"] = "processed",
         n_workers: int | None = None,
     ) -> object:
         """
-        Lifecycle curve — scalar feature over all runs.
+        Lifecycle curve â€” scalar feature over all runs.
 
         Raises
         ------
@@ -775,7 +1063,7 @@ class AssayProxy:
         return self._plotter.plot_lifecycle(
             lc,
             feature=feature,
-            title=f"{self._assay.assay_id} — Lifecycle {feature.upper()}",
+            title=f"{self._assay.assay_id} â€” Lifecycle {feature.upper()}",
         )
 
     def plot_frequency_domain(
@@ -784,7 +1072,7 @@ class AssayProxy:
         run_id: str | None = None,
         fs: float | None = None,
         column: str = "value",
-        file_type: str = "processed",
+        file_type: Literal["raw", "processed", "auto"] = "processed",
         log_scale: bool = True,
     ) -> object:
         """
@@ -794,7 +1082,7 @@ class AssayProxy:
         ----------
         df : pd.DataFrame | None
             Pre-loaded (and optionally pre-cleaned) DataFrame.  Pass ``df_clean``
-            here to exclude overflow/outlier rows before the FFT — otherwise those
+            here to exclude overflow/outlier rows before the FFT â€” otherwise those
             values will dominate the spectrum.  When omitted the data is loaded
             from the file.
         run_id : str | None
@@ -802,10 +1090,10 @@ class AssayProxy:
             Sampling frequency in Hz.  Auto-inferred from protocol parameters
             if not provided.
         column : str
-        file_type : "processed" | "raw"
+        file_type : "processed" | "raw" | "auto"
         log_scale : bool
-            True (default) — magnitude in dB; good for spotting fault sidebands.
-            False — linear amplitude; easier to read peak values in signal units.
+            True (default) â€” magnitude in dB; good for spotting fault sidebands.
+            False â€” linear amplitude; easier to read peak values in signal units.
         """
         if fs is None:
             fs = self._infer_fs()
@@ -817,13 +1105,13 @@ class AssayProxy:
             fs=fs,
             column=column,
             log_scale=log_scale,
-            title=f"{self._assay.assay_id} / {label} — FFT Spectrum",
+            title=f"{self._assay.assay_id} / {label} â€” FFT Spectrum",
         )
 
     def plot_correlation(
         self,
         columns: list[str] | None = None,
-        file_type: str = "processed",
+        file_type: Literal["raw", "processed", "auto"] = "processed",
         n_workers: int | None = None,
     ) -> object:
         """
@@ -847,14 +1135,14 @@ class AssayProxy:
         return self._plotter.plot_correlation(
             lc,
             columns=columns,
-            title=f"{self._assay.assay_id} — Feature Correlation",
+            title=f"{self._assay.assay_id} â€” Feature Correlation",
         )
 
     def plot_variability(
         self,
         run_ids: list[str] | None = None,
         value_column: str = "value",
-        file_type: str = "processed",
+        file_type: Literal["raw", "processed", "auto"] = "processed",
     ) -> object:
         """
         Boxplot of sensor amplitude per run.
@@ -875,8 +1163,10 @@ class AssayProxy:
                     run_id=run.run_id,
                     file_type=file_type,
                 )
+                df = df.copy()
+                df["run_id"] = run.run_id
                 frames.append(df)
-            except Exception as exc:
+            except (DataFileError, ValueError) as exc:
                 logger.warning("Skipping run '%s': %s", run.run_id, exc)
 
         if not frames:
@@ -890,26 +1180,26 @@ class AssayProxy:
             combined,
             value_column=value_column,
             group_by="run_id",
-            title=f"{self._assay.assay_id} — Amplitude Variability",
+            title=f"{self._assay.assay_id} â€” Amplitude Variability",
         )
 
     def plot_missing_values(
         self,
         run_id: str | None = None,
-        file_type: str = "processed",
+        file_type: Literal["raw", "processed", "auto"] = "processed",
     ) -> object:
         """Heatmap of NaN presence in a single run's time series."""
         df = self.load_dataframe(run_id=run_id, file_type=file_type)
         label = run_id or (self._assay.runs[0].run_id if self._assay.runs else "")
         return self._plotter.plot_missing_values(
             df,
-            title=f"{self._assay.assay_id} / {label} — Missing Values",
+            title=f"{self._assay.assay_id} / {label} â€” Missing Values",
         )
 
     def plot_timeseries(
         self,
         run_id: str | None = None,
-        file_type: str = "processed",
+        file_type: Literal["raw", "processed", "auto"] = "processed",
         outlier_mask: "np.ndarray | None" = None,
         show_outliers: bool = False,
         outlier_method: str = "iqr",
@@ -925,7 +1215,7 @@ class AssayProxy:
         ----------
         run_id : str | None
             Omit for single-run (diagnostic) assays.
-        file_type : "processed" | "raw"
+        file_type : "processed" | "raw" | "auto"
         show_outliers : bool
             When True, auto-detect outliers and highlight them in red.
             Ignored if ``outlier_mask`` is provided explicitly.
@@ -964,7 +1254,7 @@ class AssayProxy:
             max_points=max_points,
             xlabel="time",
             ylabel=self._ylabel(),
-            title=f"{self._assay.assay_id} / {label} — Waveform",
+            title=f"{self._assay.assay_id} / {label} â€” Waveform",
         )
 
     def plot_outlier_comparison(
@@ -990,7 +1280,7 @@ class AssayProxy:
             df_clean,
             strategy=strategy,
             ylabel=self._ylabel(),
-            title=f"{self._assay.assay_id} — Outlier correction ({strategy})",
+            title=f"{self._assay.assay_id} â€” Outlier correction ({strategy})",
         )
 
     # ------------------------------------------------------------------
@@ -1000,7 +1290,7 @@ class AssayProxy:
     def detect_outliers(
         self,
         run_id: str | None = None,
-        file_type: str = "processed",
+        file_type: Literal["raw", "processed", "auto"] = "processed",
         method: str = "iqr",
         threshold: float = 3.0,
         lower: "float | None" = None,
@@ -1013,10 +1303,10 @@ class AssayProxy:
         Parameters
         ----------
         run_id : str | None
-        file_type : "processed" | "raw"
+        file_type : "processed" | "raw" | "auto"
         method : "iqr" | "zscore" | "fixed"
-            ``"iqr"``    bounds = Q1/Q3 ± threshold × IQR.
-            ``"zscore"`` bounds = mean ± threshold × std.
+            ``"iqr"``    bounds = Q1/Q3 Â± threshold Ã— IQR.
+            ``"zscore"`` bounds = mean Â± threshold Ã— std.
             ``"fixed"``  explicit bounds only; set ``lower`` and/or ``upper``.
         threshold : float
             Multiplier for the chosen method (default 3.0).
@@ -1075,9 +1365,9 @@ class AssayProxy:
             Hard upper bound override.  Values above this are treated as outliers.
             Example: ``upper=1e7`` to remove only sensor overflow values.
         strategy : "clip" | "nan" | "drop"
-            ``"clip"`` — clamp to detection bounds (default).
-            ``"nan"``  — replace with NaN.
-            ``"drop"`` — remove outlier rows.
+            ``"clip"`` â€” clamp to detection bounds (default).
+            ``"nan"``  â€” replace with NaN.
+            ``"drop"`` â€” remove outlier rows.
         column : str
             Signal column to correct (default ``"value"``).
 
@@ -1102,29 +1392,125 @@ class AssayProxy:
             result[column] = fixed
         return result
 
+    def fill_missing_values(
+        self,
+        df: pd.DataFrame,
+        strategy: str = "interpolate",
+    ) -> pd.DataFrame:
+        """
+        Return a copy of ``df`` with NaN values filled using the chosen strategy.
+
+        Parameters
+        ----------
+        df : pd.DataFrame
+            DataFrame returned by :py:meth:`load_dataframe`.
+        strategy : "interpolate" | "ffill" | "bfill" | "mean" | "zero"
+            ``"interpolate"`` â€” linear interpolation between adjacent samples (default).
+            ``"ffill"``       â€” forward-fill from the last valid sample.
+            ``"bfill"``       â€” backward-fill from the next valid sample.
+            ``"mean"``        â€” replace every NaN with the column mean.
+            ``"zero"``        â€” replace every NaN with 0.
+
+        Returns
+        -------
+        pd.DataFrame
+            Copy of ``df`` with NaN values filled in all numeric columns.
+        """
+        result = df.copy()
+        numeric_cols = result.select_dtypes(include=["number"]).columns
+        if strategy == "interpolate":
+            result[numeric_cols] = result[numeric_cols].interpolate(
+                method="linear", limit_direction="both"
+            )
+        elif strategy == "ffill":
+            result[numeric_cols] = result[numeric_cols].ffill()
+        elif strategy == "bfill":
+            result[numeric_cols] = result[numeric_cols].bfill()
+        elif strategy == "mean":
+            for col in numeric_cols:
+                result[col] = result[col].fillna(result[col].mean())
+        elif strategy == "zero":
+            result[numeric_cols] = result[numeric_cols].fillna(0.0)
+        else:
+            raise ValueError(
+                f"Unknown strategy '{strategy}'. "
+                f"Choose one of: 'interpolate', 'ffill', 'bfill', 'mean', 'zero'."
+            )
+        return result
+
+    def sensor_info(self) -> dict:
+        """
+        Return a dictionary of all known metadata for this sensor channel.
+
+        Keys always present
+        -------------------
+        sensor_alias, assay_id, measurement_type, technology_type,
+        technology_platform, n_runs, n_raw_files, n_processed_files
+
+        Optional keys (resolved from ISA-JSON protocol parameters)
+        ----------------------------------------------------------
+        fs_hz, unit, measurement_params, factor_names
+
+        Returns
+        -------
+        dict
+        """
+        n_raw = len([r for r in self._assay.runs if r.raw_file and r.raw_file.path])
+        n_proc = len([r for r in self._assay.runs if r.processed_file and r.processed_file.path])
+        info: dict = {
+            "sensor_alias": self._assay.sensor.alias,
+            "sensor_id": self._assay.sensor.sensor_id,
+            "assay_id": self._assay.assay_id,
+            "measurement_type": self._assay.sensor.measurement_type,
+            "technology_type": self._assay.sensor.technology_type,
+            "technology_platform": self._assay.sensor.technology_platform,
+            "n_runs": len(self._assay.runs),
+            "n_raw_files": n_raw,
+            "n_processed_files": n_proc,
+        }
+        fs = self._infer_fs()
+        if fs is not None:
+            info["fs_hz"] = fs
+        unit = self._infer_unit()
+        if unit is not None:
+            info["unit"] = unit
+        if self._assay.runs:
+            info["measurement_params"] = [str(pv) for pv in self._assay.runs[0].measurement_params]
+            info["factor_names"] = list(self._assay.runs[0].factor_values.keys())
+        return info
+
     # ------------------------------------------------------------------
     # Private helpers
     # ------------------------------------------------------------------
+
+    # Units that describe protocol/timing metadata, not the measured signal.
+    _SKIP_UNITS: frozenset[str] = frozenset(
+        {"hz", "khz", "mhz", "min", "s", "ms", "sec", "second", "seconds",
+         "hr", "hour", "hours"}
+    )
 
     def _infer_unit(self) -> str | None:
         """
         Attempt to infer the signal measurement unit from protocol parameters.
 
         Checks ``pv.unit`` (resolved ontology string) first, skipping
-        frequency units (Hz/kHz — those describe sampling rate, not the
-        measured quantity).  Falls back to ``pv.value`` when it looks like a
-        short non-numeric unit string (e.g. ``"nm"``).
+        frequency units (Hz/kHz â€” those describe sampling rate, not the
+        measured quantity) and time/duration units (min, s, ms, hr â€” those
+        describe sampling intervals, not the physical signal).  Falls back to
+        ``pv.value`` when it looks like a short non-numeric unit string (e.g.
+        ``"nm"``).
         """
         if not self._assay.runs:
             return None
         for pv in self._assay.runs[0].measurement_params:
-            if pv.unit and "hz" not in pv.unit.lower():
+            if pv.unit and pv.unit.lower() not in self._SKIP_UNITS and "hz" not in pv.unit.lower():
                 return pv.unit
             if (
                 not pv.unit
                 and isinstance(pv.value, str)
                 and 1 <= len(pv.value.strip()) <= 8
                 and not pv.value.strip().replace(".", "").replace("-", "").isdigit()
+                and pv.value.strip().lower() not in self._SKIP_UNITS
             ):
                 return pv.value.strip()
         return None
@@ -1154,6 +1540,14 @@ class AssayProxy:
                     continue
         return None
 
+    def _first_or_run(self, run_id: str | None) -> "RunRecord | None":
+        """Return the named run, or the first run when run_id is None."""
+        if not self._assay.runs:
+            return None
+        if run_id is None:
+            return self._assay.runs[0]
+        return self._assay.get_run(run_id)
+
 
 # ---------------------------------------------------------------------------
 # RunProxy
@@ -1163,7 +1557,7 @@ class RunProxy:
     """
     Single-run level proxy.
 
-    Acquire via: ``wrapper.study("…").assay("…").run("run_01")``
+    Acquire via: ``wrapper.study("â€¦").assay("â€¦").run("run_01")``
     """
 
     def __init__(
@@ -1213,7 +1607,7 @@ class RunProxy:
         """Return study-level factor values for this run."""
         return dict(self._run.factor_values)
 
-    def load_dataframe(self, file_type: str = "processed") -> pd.DataFrame:
+    def load_dataframe(self, file_type: Literal["raw", "processed", "auto"] = "processed") -> pd.DataFrame:
         """Load this run's data file into a DataFrame."""
         return self._integrator.load(
             self._assay,
@@ -1222,18 +1616,30 @@ class RunProxy:
             file_type=file_type,
         )
 
+    def load_dataframe_with_meta(
+        self,
+        file_type: Literal["raw", "processed", "auto"] = "processed",
+    ) -> tuple[pd.DataFrame, DataLoadMetadata]:
+        """Load run data and return DataFrame plus resolved file-load metadata."""
+        return self._integrator.load_with_meta(
+            self._assay,
+            study_id=self._study.study_id,
+            run_id=self._run.run_id,
+            file_type=file_type,
+        )
+
     def plot_distribution(
-        self, column: str = "value", bins: int = 50, file_type: str = "processed"
+        self, column: str = "value", bins: int = 50, file_type: Literal["raw", "processed", "auto"] = "processed"
     ) -> object:
         """Amplitude histogram + KDE."""
         df = self.load_dataframe(file_type=file_type)
         return self._plotter.plot_distribution(
             df, column=column, bins=bins,
-            title=f"{self._assay.assay_id} / {self._run.run_id} — Distribution"
+            title=f"{self._assay.assay_id} / {self._run.run_id} â€” Distribution"
         )
 
     def plot_frequency_domain(
-        self, fs: float | None = None, column: str = "value", file_type: str = "processed"
+        self, fs: float | None = None, column: str = "value", file_type: Literal["raw", "processed", "auto"] = "processed"
     ) -> object:
         """FFT magnitude spectrum."""
         if fs is None:
@@ -1248,5 +1654,8 @@ class RunProxy:
         df = self.load_dataframe(file_type=file_type)
         return self._plotter.plot_frequency_domain(
             df, fs=fs, column=column,
-            title=f"{self._assay.assay_id} / {self._run.run_id} — FFT Spectrum"
+            title=f"{self._assay.assay_id} / {self._run.run_id} â€” FFT Spectrum"
         )
+
+
+

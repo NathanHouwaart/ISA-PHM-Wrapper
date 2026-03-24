@@ -72,7 +72,7 @@ class ParameterValue(BaseModel):
     """A single resolved parameter value from a process sequence."""
 
     parameter_name: str
-    value: Any
+    value: str | int | float | bool | None
     unit: str | None = None
 
     def __str__(self) -> str:
@@ -196,6 +196,17 @@ class ContactModel(BaseModel):
         return f"{self.first_name} {self.last_name}".strip()
 
 
+class PublicationModel(BaseModel):
+    """A publication entry from the investigation-level ISA block."""
+
+    title: str
+    doi: str | None = None
+    pubmed_id: str | None = None
+    status: str | None = None
+    author_tokens: list[str] = Field(default_factory=list)
+    corresponding_author: str | None = None
+
+
 class StudyModel(BaseModel):
     """One study (experiment) in the ISA investigation."""
 
@@ -231,6 +242,63 @@ class InvestigationModel(BaseModel):
     experiment_type: str  # raw value from ISA comments, e.g. "diagnostic-single"
     studies: list[StudyModel] = Field(default_factory=list)
     contacts: list[ContactModel] = Field(default_factory=list)
+    publications: list[PublicationModel] = Field(default_factory=list)
+
+    def contacts_df(self) -> "pd.DataFrame":
+        """Return investigation contacts as a DataFrame."""
+        import pandas as pd
+
+        rows = [
+            {
+                "full_name": c.full_name,
+                "first_name": c.first_name,
+                "last_name": c.last_name,
+                "email": c.email,
+                "affiliation": c.affiliation,
+                "roles": ", ".join(c.roles),
+                "orcid": c.orcid or "",
+            }
+            for c in self.contacts
+        ]
+        return pd.DataFrame(
+            rows,
+            columns=[
+                "full_name",
+                "first_name",
+                "last_name",
+                "email",
+                "affiliation",
+                "roles",
+                "orcid",
+            ],
+        )
+
+    def publications_df(self) -> "pd.DataFrame":
+        """Return investigation publications as a DataFrame."""
+        import pandas as pd
+
+        rows = [
+            {
+                "title": p.title,
+                "doi": p.doi or "",
+                "pubmed_id": p.pubmed_id or "",
+                "status": p.status or "",
+                "author_tokens": "; ".join(p.author_tokens),
+                "corresponding_author": p.corresponding_author or "",
+            }
+            for p in self.publications
+        ]
+        return pd.DataFrame(
+            rows,
+            columns=[
+                "title",
+                "doi",
+                "pubmed_id",
+                "status",
+                "author_tokens",
+                "corresponding_author",
+            ],
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -319,6 +387,51 @@ class RunOverview(BaseModel):
     factor_values: dict[str, Any] = Field(default_factory=dict)
     measurement_params: list[dict[str, Any]] = Field(default_factory=list)
     processing_params: list[dict[str, Any]] = Field(default_factory=list)
+
+
+# ---------------------------------------------------------------------------
+# File-load metadata
+# ---------------------------------------------------------------------------
+
+
+class DataLoadMetadata(BaseModel):
+    assay_id: str
+    run_id: str
+    requested_file_type: Literal["raw", "processed", "auto"]
+    resolved_file_type: Literal["raw", "processed"]
+    file_path: str
+    from_cache: bool = False
+
+
+# ---------------------------------------------------------------------------
+# Semantic normalization models
+# ---------------------------------------------------------------------------
+
+
+class SemanticField(BaseModel):
+    source_name: str
+    source_kind: Literal["factor", "measurement_parameter", "processing_parameter"]
+    semantic_key: str
+    status: Literal["mapped", "unknown", "ambiguous"]
+    confidence: float
+    provenance: str
+    candidates: list[str] = Field(default_factory=list)
+    context: dict[str, Any] = Field(default_factory=dict)
+
+
+class SemanticDiagnostics(BaseModel):
+    total_fields: int = 0
+    mapped_fields: int = 0
+    unknown_fields: int = 0
+    ambiguous_fields: int = 0
+
+
+class SemanticManifest(BaseModel):
+    investigation_id: str
+    study_factors: dict[str, list[SemanticField]] = Field(default_factory=dict)
+    assay_measurement_params: dict[str, list[SemanticField]] = Field(default_factory=dict)
+    assay_processing_params: dict[str, list[SemanticField]] = Field(default_factory=dict)
+    diagnostics: SemanticDiagnostics = Field(default_factory=SemanticDiagnostics)
 
 
 # ---------------------------------------------------------------------------

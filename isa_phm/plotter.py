@@ -204,6 +204,71 @@ class ISAPlotter:
         ]))
         return p
 
+    def plot_multi_lifecycle(
+        self,
+        lifecycle_dfs: "dict[str, pd.DataFrame]",
+        feature: str = "rms",
+        title: str | None = None,
+        palette: "list[str] | None" = None,
+    ):
+        """
+        Overlay lifecycle curves for multiple assays or bearings on one figure.
+
+        Parameters
+        ----------
+        lifecycle_dfs : dict[str, pd.DataFrame]
+            Mapping of ``{label: lifecycle_df}``.  Each DataFrame must have
+            columns ``run_number`` and ``feature``.
+        feature : str
+            Scalar feature column to plot (default ``"rms"``).
+        title : str | None
+        palette : list[str] | None
+            Line/marker colours.  Defaults to Bokeh Category10.
+
+        Returns
+        -------
+        bokeh.plotting.figure
+        """
+        if not lifecycle_dfs:
+            raise PlotError("lifecycle_dfs is empty — nothing to plot.")
+
+        n = len(lifecycle_dfs)
+        colors = palette or list(_bokeh_palettes.Category10[max(3, min(10, n))])
+        if len(colors) < n:
+            colors = (colors * (n // len(colors) + 1))[:n]
+
+        p = bokeh_figure(
+            width=self._cfg.width,
+            height=self._cfg.height,
+            title=title or f"Prognostic Lifecycle Comparison — {feature.upper()}",
+            x_axis_label="Run number",
+            y_axis_label=feature.upper(),
+            tools="pan,wheel_zoom,box_zoom,reset,save",
+        )
+        p.title.text_font_size = self._cfg.title_fontsize
+
+        for (label, lc_df), color in zip(lifecycle_dfs.items(), colors):
+            if lc_df.empty or feature not in lc_df.columns:
+                logger.warning("plot_multi_lifecycle: skipping '%s': missing '%s'.", label, feature)
+                continue
+            df_sorted = lc_df.sort_values("run_number")
+            src = ColumnDataSource(dict(
+                x=df_sorted["run_number"].tolist(),
+                y=df_sorted[feature].tolist(),
+                label=[label] * len(df_sorted),
+            ))
+            p.line("x", "y", source=src, color=color, line_width=1.8, legend_label=label)
+            p.scatter("x", "y", source=src, color=color, size=5)
+
+        p.legend.location = "top_left"
+        p.legend.click_policy = "hide"
+        p.add_tools(HoverTool(tooltips=[
+            ("Run",    "@x"),
+            (feature.upper(), "@y{0.000000}"),
+            ("Label",  "@label"),
+        ]))
+        return p
+
     # ------------------------------------------------------------------
     # 3. plot_frequency_domain
     # ------------------------------------------------------------------

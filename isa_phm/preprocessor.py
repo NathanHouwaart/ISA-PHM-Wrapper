@@ -245,9 +245,9 @@ class ISAPreprocessor:
             return str(raw_path), False
 
         # Relative path — join with data_root.
-        resolved = (self._data_root / raw_path).resolve()
+        resolved = (self._data_root / raw_path).resolve(strict=False)
         self._check_traversal(resolved, entity_id)
-        return str(resolved), str(resolved) != str(raw_path.resolve())
+        return str(resolved), str(resolved) != str(raw_path.resolve(strict=False))
 
     def _check_traversal(self, resolved: Path, entity_id: str) -> None:
         """Raise PreprocessingError if resolved path escapes data_root."""

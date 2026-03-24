@@ -15,11 +15,15 @@ Covers:
 
 from __future__ import annotations
 
+import json
+import numpy as np
+import pandas as pd
 import pytest
 
 from isa_phm.errors import (
     AmbiguousRunError,
     AssayNotFoundError,
+    DataFileError,
     StudyNotFoundError,
     RunNotFoundError,
 )
@@ -182,6 +186,48 @@ class TestStudyProxy:
 
 
 # ---------------------------------------------------------------------------
+# StudyProxy.get_fault_labels
+# ---------------------------------------------------------------------------
+
+class TestStudyProxyGetFaultLabels:
+    @staticmethod
+    def _study(isa_path, tmp_path):
+        nav, _ = _build_navigator(isa_path, tmp_path)
+        return nav.study("Test Study")
+
+    def test_empty_when_no_fault_factors(self, minimal_single_run_isa_file, tmp_path):
+        df = self._study(minimal_single_run_isa_file, tmp_path).get_fault_labels()
+        assert isinstance(df, pd.DataFrame)
+        assert len(df) == 0
+        assert list(df.columns) == ["assay_id", "run_id", "run_number"]
+
+    def test_returns_fault_column(self, minimal_fault_isa_file, tmp_path):
+        df = self._study(minimal_fault_isa_file, tmp_path).get_fault_labels()
+        assert "Fault size" in df.columns
+        assert {"assay_id", "run_id", "run_number"}.issubset(df.columns)
+        assert len(df) == 3  # 1 assay × 3 runs
+        assert df["Fault size"].notna().all()
+
+    def test_filter_by_assay_id(self, minimal_fault_isa_file, tmp_path):
+        df = self._study(minimal_fault_isa_file, tmp_path).get_fault_labels(
+            assay_id="st01_se01"
+        )
+        assert list(df["assay_id"].unique()) == ["a_st01_se01"]
+        assert len(df) == 3
+
+    def test_run_number_is_1_based(self, minimal_fault_isa_file, tmp_path):
+        df = self._study(minimal_fault_isa_file, tmp_path).get_fault_labels()
+        assert list(df["run_number"]) == [1, 2, 3]
+
+    def test_unknown_assay_id_returns_empty(self, minimal_fault_isa_file, tmp_path):
+        df = self._study(minimal_fault_isa_file, tmp_path).get_fault_labels(
+            assay_id="nonexistent"
+        )
+        assert len(df) == 0
+        assert "Fault size" in df.columns
+
+
+# ---------------------------------------------------------------------------
 # AssayProxy — single-run
 # ---------------------------------------------------------------------------
 
@@ -216,6 +262,19 @@ class TestAssayProxySingleRun:
         assert list(df.columns) == ["time", "value"], (
             f"Expected only [time, value], got {list(df.columns)}"
         )
+
+    def test_load_dataframe_with_meta_auto(self, minimal_single_run_isa_file, tmp_path):
+        assay = self._assay(minimal_single_run_isa_file, tmp_path)
+        df, meta = assay.load_dataframe_with_meta(file_type="auto")
+        assert list(df.columns) == ["time", "value"]
+        assert meta.requested_file_type == "auto"
+        assert meta.resolved_file_type == "processed"
+        assert meta.run_id == "run_01"
+
+    def test_invalid_file_type_raises(self, minimal_single_run_isa_file, tmp_path):
+        assay = self._assay(minimal_single_run_isa_file, tmp_path)
+        with pytest.raises(DataFileError, match="Invalid file_type"):
+            assay.load_dataframe(file_type="invalid")
 
     def test_missing_values_report(self, minimal_single_run_isa_file, tmp_path):
         assay = self._assay(minimal_single_run_isa_file, tmp_path)
@@ -298,3 +357,158 @@ class TestRunProxy:
         df = run.load_dataframe()
         assert "time" in df.columns
         assert "value" in df.columns
+
+    def test_load_dataframe_with_meta(self, minimal_single_run_isa_file, tmp_path):
+        run = self._run(minimal_single_run_isa_file, tmp_path)
+        df, meta = run.load_dataframe_with_meta(file_type="auto")
+        assert list(df.columns) == ["time", "value"]
+        assert meta.requested_file_type == "auto"
+        assert meta.resolved_file_type == "processed"
+        assert meta.run_id == "run_01"
+
+
+# ---------------------------------------------------------------------------
+# Proxy file_type strict/auto contract
+# ---------------------------------------------------------------------------
+
+class TestProxyFileTypeContract:
+    @staticmethod
+    def _raw_only_isa_file(minimal_single_run_isa, tmp_csv, tmp_path):
+        isa = minimal_single_run_isa
+        assay = isa["studies"][0]["assays"][0]
+        for data_file in assay["dataFiles"]:
+            if data_file.get("type") == "Raw Data File":
+                data_file["name"] = str(tmp_csv)
+            elif data_file.get("type") == "Processed Data File":
+                data_file["name"] = ""
+        p = tmp_path / "i_raw_only_proxy.json"
+        p.write_text(json.dumps(isa), encoding="utf-8")
+        return p
+
+    def test_auto_falls_back_to_raw_via_proxy(
+        self, minimal_single_run_isa, tmp_csv, tmp_path
+    ):
+        isa_file = self._raw_only_isa_file(minimal_single_run_isa, tmp_csv, tmp_path)
+        nav, _ = _build_navigator(isa_file, tmp_path)
+        assay = nav.study("Test Study").assay("a_st01_se01")
+
+        _, meta = assay.load_dataframe_with_meta(file_type="auto")
+        assert meta.requested_file_type == "auto"
+        assert meta.resolved_file_type == "raw"
+        assert meta.file_path == str(tmp_csv)
+
+    def test_processed_missing_raises_via_proxy(
+        self, minimal_single_run_isa, tmp_csv, tmp_path
+    ):
+        isa_file = self._raw_only_isa_file(minimal_single_run_isa, tmp_csv, tmp_path)
+        nav, _ = _build_navigator(isa_file, tmp_path)
+        assay = nav.study("Test Study").assay("a_st01_se01")
+
+        with pytest.raises(DataFileError, match="no 'processed' data file"):
+            assay.load_dataframe(file_type="processed")
+
+
+# ---------------------------------------------------------------------------
+# AssayProxy — fix_outliers strategies
+# ---------------------------------------------------------------------------
+
+class TestAssayProxyFixOutliersStrategies:
+    """Test the interpolate, ffill, and bfill fix strategies."""
+
+    @staticmethod
+    def _outlier_df(outlier_indices: list[int], n: int = 100):
+        """Return a DataFrame with obvious outliers at the given indices."""
+        t = np.linspace(0, 1, n)
+        v = np.ones(n, dtype=float)
+        for i in outlier_indices:
+            v[i] = 1_000_000.0  # extreme spike
+        return pd.DataFrame({"time": t, "value": v})
+
+    def _assay(self, minimal_single_run_isa_file, tmp_path) -> AssayProxy:
+        nav, _ = _build_navigator(minimal_single_run_isa_file, tmp_path)
+        return nav.study("Test Study").assay("a_st01_se01")
+
+    def test_interpolate_no_nan_remain(self, minimal_single_run_isa_file, tmp_path):
+        assay = self._assay(minimal_single_run_isa_file, tmp_path)
+        df_in = self._outlier_df(outlier_indices=[10, 50])
+        result = assay.fix_outliers(df_in, method="iqr", strategy="interpolate")
+        assert result["value"].isna().sum() == 0, "interpolate must not leave NaNs"
+
+    def test_interpolate_reduces_spike(self, minimal_single_run_isa_file, tmp_path):
+        assay = self._assay(minimal_single_run_isa_file, tmp_path)
+        df_in = self._outlier_df(outlier_indices=[10])
+        result = assay.fix_outliers(df_in, method="iqr", strategy="interpolate")
+        assert abs(result.at[10, "value"]) < 1_000, (
+            "Interpolated value should be close to neighbouring values"
+        )
+
+    def test_ffill_no_nan_remain(self, minimal_single_run_isa_file, tmp_path):
+        assay = self._assay(minimal_single_run_isa_file, tmp_path)
+        df_in = self._outlier_df(outlier_indices=[20, 80])
+        result = assay.fix_outliers(df_in, method="iqr", strategy="ffill")
+        assert result["value"].isna().sum() == 0, "ffill must not leave NaNs"
+
+    def test_bfill_no_nan_remain(self, minimal_single_run_isa_file, tmp_path):
+        assay = self._assay(minimal_single_run_isa_file, tmp_path)
+        df_in = self._outlier_df(outlier_indices=[30])
+        result = assay.fix_outliers(df_in, method="iqr", strategy="bfill")
+        assert result["value"].isna().sum() == 0, "bfill must not leave NaNs"
+
+    def test_unknown_strategy_raises(self, minimal_single_run_isa_file, tmp_path):
+        assay = self._assay(minimal_single_run_isa_file, tmp_path)
+        df_in = self._outlier_df(outlier_indices=[5])
+        with pytest.raises(ValueError, match="Unknown fix strategy"):
+            assay.fix_outliers(df_in, strategy="bogus")
+
+
+# ---------------------------------------------------------------------------
+# AssayProxy — list_measurement_params / list_processing_params
+# ---------------------------------------------------------------------------
+
+class TestAssayProxyParamListing:
+    """Tests for list_measurement_params() and list_processing_params()."""
+
+    @staticmethod
+    def _assay_from_file(isa_file: Path, tmp_path) -> AssayProxy:
+        nav, _ = _build_navigator(isa_file, tmp_path)
+        return nav.study("Test Study").assay("a_st01_se01")
+
+    # -- empty case (no params defined in fixture) --------------------------
+
+    def test_measurement_params_empty_returns_dataframe(
+        self, minimal_single_run_isa_file, tmp_path
+    ):
+        assay = self._assay_from_file(minimal_single_run_isa_file, tmp_path)
+        df = assay.list_measurement_params()
+        assert isinstance(df, pd.DataFrame)
+        assert list(df.columns) == ["parameter_name", "value", "unit"]
+        assert len(df) == 0
+
+    def test_processing_params_empty_returns_dataframe(
+        self, minimal_single_run_isa_file, tmp_path
+    ):
+        assay = self._assay_from_file(minimal_single_run_isa_file, tmp_path)
+        df = assay.list_processing_params()
+        assert isinstance(df, pd.DataFrame)
+        assert list(df.columns) == ["parameter_name", "value", "unit"]
+        assert len(df) == 0
+
+    # -- populated case (fixture with actual parameterValues) ---------------
+
+    def test_measurement_params_populated(self, minimal_params_isa_file, tmp_path):
+        assay = self._assay_from_file(minimal_params_isa_file, tmp_path)
+        df = assay.list_measurement_params()
+        assert isinstance(df, pd.DataFrame)
+        assert list(df.columns) == ["parameter_name", "value", "unit"]
+        assert len(df) == 1
+        assert df.at[0, "parameter_name"] == "Sampling rate"
+        assert df.at[0, "value"] == 25600
+
+    def test_processing_params_populated(self, minimal_params_isa_file, tmp_path):
+        assay = self._assay_from_file(minimal_params_isa_file, tmp_path)
+        df = assay.list_processing_params()
+        assert isinstance(df, pd.DataFrame)
+        assert list(df.columns) == ["parameter_name", "value", "unit"]
+        assert len(df) == 1
+        assert df.at[0, "parameter_name"] == "Window size"
+        assert df.at[0, "value"] == 1024

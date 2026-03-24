@@ -42,6 +42,7 @@ from .schemas import (
     FactorModel,
     InvestigationModel,
     ParameterValue,
+    PublicationModel,
     ProtocolModel,
     ProtocolParameter,
     RunRecord,
@@ -87,6 +88,9 @@ class MetadataExtractor:
 
         experiment_type = self._extract_comment(repaired, "experiment_type", "unknown")
         contacts = [self._extract_contact(p) for p in repaired.get("people", [])]
+        publications = [
+            self._extract_publication(p) for p in repaired.get("publications", [])
+        ]
         studies = [
             self._extract_study(s, resolver)
             for s in repaired.get("studies", [])
@@ -99,6 +103,7 @@ class MetadataExtractor:
             experiment_type=experiment_type,
             studies=studies,
             contacts=contacts,
+            publications=publications,
         )
 
     # ------------------------------------------------------------------
@@ -397,6 +402,49 @@ class MetadataExtractor:
             orcid=orcid,
         )
 
+    def _extract_publication(self, publication: dict) -> PublicationModel:
+        """
+        Extract an investigation-level publication record.
+
+        ISA authorList is typically a semicolon-separated string of author tokens
+        (often contact IDs). Tokens are preserved as-is after trimming.
+        """
+        author_raw = publication.get("authorList", "")
+        if isinstance(author_raw, str):
+            author_tokens = [
+                token.strip().lstrip("#")
+                for token in author_raw.split(";")
+                if token.strip()
+            ]
+        else:
+            author_tokens = []
+
+        corresponding_author: str | None = None
+        for comment in publication.get("comments", []):
+            if (comment.get("name") or "").strip().lower() == "corresponding author id":
+                raw_value = comment.get("value")
+                if raw_value:
+                    corresponding_author = str(raw_value).strip().lstrip("#")
+                break
+
+        status_obj = publication.get("status") or {}
+        status = (
+            status_obj.get("annotationValue", "")
+            if isinstance(status_obj, dict)
+            else str(status_obj)
+        )
+
+        doi = publication.get("doi")
+        pubmed_id = publication.get("pubMedID")
+        return PublicationModel(
+            title=publication.get("title", ""),
+            doi=str(doi).strip() if doi else None,
+            pubmed_id=str(pubmed_id).strip() if pubmed_id else None,
+            status=str(status).strip() if status else None,
+            author_tokens=author_tokens,
+            corresponding_author=corresponding_author,
+        )
+
     # ------------------------------------------------------------------
     # Helpers
     # ------------------------------------------------------------------
@@ -419,11 +467,15 @@ def _order_process_chain(processes: list[dict]) -> list[dict]:
     Return the process list in chain order by following nextProcess links.
 
     Starts at the root process (no previousProcess field) and walks
-    forward via nextProcess until the chain ends or a cycle is detected.
-    Falls back to the original list order if no root is found.
+    forward via nextProcess until the chain ends.
+
+    Raises ExtractionError when cycles or unreachable processes are found.
     """
     if not processes:
         return []
+
+    if any("@id" not in p for p in processes):
+        raise ExtractionError("Process chain contains process entries without '@id'.")
 
     by_id = {p["@id"]: p for p in processes if "@id" in p}
 
@@ -431,11 +483,9 @@ def _order_process_chain(processes: list[dict]) -> list[dict]:
     roots = [p for p in processes if "previousProcess" not in p or not p.get("previousProcess")]
 
     if not roots:
-        logger.warning(
-            "Process chain has no clear root (all have previousProcess). "
-            "Using original list order."
+        raise ExtractionError(
+            "Process chain has no clear root (all processes have previousProcess)."
         )
-        return list(processes)
 
     if len(roots) > 1:
         logger.debug(
@@ -453,8 +503,9 @@ def _order_process_chain(processes: list[dict]) -> list[dict]:
         while current is not None:
             cid = current.get("@id", "")
             if cid in seen:
-                logger.warning("Cycle detected at process '%s'. Stopping chain traversal.", cid)
-                break
+                raise ExtractionError(
+                    f"Cycle detected in process chain at process '{cid}'."
+                )
             seen.add(cid)
             ordered.append(current)
 
@@ -465,12 +516,13 @@ def _order_process_chain(processes: list[dict]) -> list[dict]:
             else:
                 current = None
 
-    # Warn if the chain walk missed any processes (e.g. unreachable cycles).
+    # Hard-fail if the chain walk missed any processes (e.g. unreachable cycles).
     if len(ordered) < len(processes):
-        logger.warning(
-            "Process chain walk captured %d of %d processes. "
-            "Some processes may be unreachable.",
-            len(ordered), len(processes),
+        missing = sorted(set(by_id.keys()) - {p.get("@id", "") for p in ordered})
+        raise ExtractionError(
+            "Process chain walk did not cover all processes. "
+            f"Captured {len(ordered)} of {len(processes)}. "
+            f"Unreachable process IDs: {missing}"
         )
 
     return ordered

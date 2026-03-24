@@ -1,55 +1,41 @@
-"""
-DataIntegrator — load ISA-PHM measurement data files into pandas DataFrames.
+﻿"""
+DataIntegrator: load ISA-PHM measurement files into pandas DataFrames.
 
-Two-track access (SR-5: must handle >2500 runs)
-------------------------------------------------
-Track 1 — FIFO cache (interactive, single-run access)
-    Each DataFrame is stored by key (assay_id, run_id, file_type).
-    Max 100 entries; oldest evicted when full.
-    Used by: AssayProxy.load_dataframe(), RunProxy.load_dataframe().
-
-Track 2 — Streaming generator (lifecycle over many runs)
-    Loads one run's CSV at a time, computes 8 scalar features, yields a dict.
-    Never keeps more than one run's DataFrame in memory simultaneously.
-    Used by: AssayProxy.lifecycle_features().
-
-CSV loading contract (SR-2)
----------------------------
-- Format: CSV or TSV only.
-- Encoding: UTF-8 (Latin-1 fallback).
-- Delimiter: auto-detected via pandas sep=None, engine="python".
-- Shape: exactly 2 columns (time, value). First column = time, second = measurement.
-- Result columns: [time, value, study_id, assay_id, run_id, sensor_alias,
-                   measurement_type, file_type]
+Two access modes:
+1) Cached single-run loading for interactive usage.
+2) Streaming lifecycle feature extraction for many runs.
 """
 
 from __future__ import annotations
 
+import csv
 import logging
 import os
 from collections import OrderedDict
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
-from typing import Generator, Literal
+from typing import Generator, Literal, cast
 
 import numpy as np
 import pandas as pd
 
 from .errors import AmbiguousRunError, DataFileError, RunNotFoundError
-from .schemas import AssayModel, DataFile, RunRecord
+from .schemas import AssayModel, DataFile, DataLoadMetadata, RunRecord
 from .utils import compute_features
 
 logger = logging.getLogger("isa_phm")
 
-# Standard DataFrame columns always present after integration.
 STANDARD_COLUMNS = (
     "time",
     "value",
 )
 
+REQUESTED_FILE_TYPES: tuple[str, ...] = ("raw", "processed", "auto")
+RESOLVED_FILE_TYPES: tuple[str, ...] = ("raw", "processed")
+
 
 class _FIFOCache:
-    """Simple FIFO eviction cache backed by an OrderedDict."""
+    """Simple FIFO eviction cache backed by OrderedDict."""
 
     def __init__(self, maxsize: int = 100) -> None:
         self._maxsize = maxsize
@@ -60,13 +46,10 @@ class _FIFOCache:
 
     def put(self, key: tuple, df: pd.DataFrame) -> None:
         if key in self._store:
-            return  # Already cached; don't re-insert.
+            return
         if len(self._store) >= self._maxsize:
-            self._store.popitem(last=False)  # Remove oldest.
+            self._store.popitem(last=False)
         self._store[key] = df
-
-    def __contains__(self, key: tuple) -> bool:
-        return key in self._store
 
     def clear(self) -> None:
         self._store.clear()
@@ -76,24 +59,14 @@ class _FIFOCache:
 
 
 class DataIntegrator:
-    """
-    Load and cache ISA-PHM data files as enriched pandas DataFrames.
-
-    Parameters
-    ----------
-    data_root : Path
-        Base directory for resolving relative paths (passed through from
-        the preprocessor; absolute paths are used as-is).
-    cache_maxsize : int
-        Maximum number of DataFrames held in the FIFO cache (default 100).
-    """
+    """Load and cache ISA-PHM data files as normalized DataFrames."""
 
     def __init__(self, data_root: Path, cache_maxsize: int = 100) -> None:
         self._data_root = Path(data_root)
         self._cache = _FIFOCache(maxsize=cache_maxsize)
 
     # ------------------------------------------------------------------
-    # Public: single-run loading (Track 1, cached)
+    # Public: single-run loading
     # ------------------------------------------------------------------
 
     def load(
@@ -101,107 +74,102 @@ class DataIntegrator:
         assay: AssayModel,
         study_id: str,
         run_id: str | None = None,
-        file_type: Literal["raw", "processed"] = "processed",
+        file_type: Literal["raw", "processed", "auto"] = "processed",
     ) -> pd.DataFrame:
         """
-        Load a run's data file into a DataFrame.
+        Load a run into a DataFrame with columns [time, value].
 
-        For diagnostic assays (1 run) run_id may be None — it is inferred
-        automatically.  For multi-run assays run_id is required.
-
-        Parameters
-        ----------
-        assay : AssayModel
-        study_id : str
-             Needed for metadata columns.
-        run_id : str | None
-        file_type : "raw" | "processed"
-
-        Returns
-        -------
-        pd.DataFrame with columns STANDARD_COLUMNS.
-
-        Raises
-        ------
-        AmbiguousRunError
-            Multi-run assay and run_id is None.
-        RunNotFoundError
-            run_id not found in assay.runs.
-        DataFileError
-            File missing, empty path, or CSV load failure.
+        ``file_type='auto'`` prefers processed and falls back to raw.
         """
-        run = self._resolve_run(assay, run_id)
-        cache_key = (assay.assay_id, run.run_id, file_type)
+        df, _ = self.load_with_meta(
+            assay=assay,
+            study_id=study_id,
+            run_id=run_id,
+            file_type=file_type,
+        )
+        return df
 
+    def load_with_meta(
+        self,
+        assay: AssayModel,
+        study_id: str,
+        run_id: str | None = None,
+        file_type: Literal["raw", "processed", "auto"] = "processed",
+    ) -> tuple[pd.DataFrame, DataLoadMetadata]:
+        """Load a run and return DataFrame plus resolved file-load metadata."""
+        del study_id  # Reserved for future metadata enrichment.
+
+        requested_file_type = self._validate_file_type(file_type)
+        run = self._resolve_run(assay, run_id)
+        data_file, resolved_file_type = self._resolve_data_file(
+            assay_id=assay.assay_id,
+            run=run,
+            requested_file_type=requested_file_type,
+        )
+
+        cache_key = (assay.assay_id, run.run_id, resolved_file_type)
         cached = self._cache.get(cache_key)
         if cached is not None:
             logger.debug("Cache hit: %s", cache_key)
-            return cached
+            return cached, DataLoadMetadata(
+                assay_id=assay.assay_id,
+                run_id=run.run_id,
+                requested_file_type=requested_file_type,
+                resolved_file_type=resolved_file_type,
+                file_path=data_file.path,
+                from_cache=True,
+            )
 
-        df = self._load_run(assay, study_id, run, file_type)
+        df = self._read_csv(Path(data_file.path))
+        self._normalize_time(df, run)
         self._cache.put(cache_key, df)
-        return df
+        return df, DataLoadMetadata(
+            assay_id=assay.assay_id,
+            run_id=run.run_id,
+            requested_file_type=requested_file_type,
+            resolved_file_type=resolved_file_type,
+            file_path=data_file.path,
+            from_cache=False,
+        )
 
     # ------------------------------------------------------------------
-    # Public: streaming lifecycle features (Track 2, no cache)
+    # Public: streaming lifecycle features
     # ------------------------------------------------------------------
 
     def stream_lifecycle_features(
         self,
         assay: AssayModel,
         study_id: str,
-        file_type: Literal["raw", "processed"] = "processed",
+        file_type: Literal["raw", "processed", "auto"] = "processed",
     ) -> Generator[dict, None, None]:
-        """
-        Yield one feature dict per run without loading all runs simultaneously.
+        """Yield one lifecycle feature row per run without caching all runs."""
+        requested_file_type = self._validate_file_type(file_type)
 
-        Each yielded dict has keys:
-            run_id, run_number, study_id, assay_id,
-            rms, max, mean, peak2peak, kurtosis, std, crest_factor, skewness.
-
-        Runs whose data file is missing or empty are skipped (logged as WARNING).
-
-        Parameters
-        ----------
-        assay : AssayModel
-        study_id : str
-        file_type : "processed" (default) | "raw"
-
-        Yields
-        ------
-        dict
-        """
         for run in assay.runs:
-            data_file = run.processed_file if file_type == "processed" else run.raw_file
-
-            if data_file is None or not data_file.path:
-                logger.warning(
-                    "Run '%s' of assay '%s' has no %s data file path — skipping.",
-                    run.run_id, assay.assay_id, file_type,
-                )
-                continue
-
-            # Check cache first (may have been loaded interactively).
-            cache_key = (assay.assay_id, run.run_id, file_type)
-            cached = self._cache.get(cache_key)
-
             try:
+                data_file, resolved_file_type = self._resolve_data_file(
+                    assay_id=assay.assay_id,
+                    run=run,
+                    requested_file_type=requested_file_type,
+                )
+                cache_key = (assay.assay_id, run.run_id, resolved_file_type)
+                cached = self._cache.get(cache_key)
                 if cached is not None:
                     raw_values = self._get_value_column(cached)
                 else:
                     df = self._read_csv(Path(data_file.path))
                     raw_values = self._get_value_column(df)
-                    # Do NOT cache — streaming mode keeps only one DF alive.
             except DataFileError as exc:
                 logger.warning(
                     "Skipping run '%s' of assay '%s': %s",
-                    run.run_id, assay.assay_id, exc,
+                    run.run_id,
+                    assay.assay_id,
+                    exc,
                 )
                 continue
 
             values = raw_values.dropna().to_numpy(dtype=np.float64)
             features = compute_features(values)
-
             yield {
                 "run_id": run.run_id,
                 "run_number": run.run_number,
@@ -213,30 +181,20 @@ class DataIntegrator:
 
     def _compute_run_features(
         self,
-        run: "RunRecord",
+        run: RunRecord,
         assay: AssayModel,
         study_id: str,
-        file_type: str,
+        file_type: Literal["raw", "processed", "auto"],
     ) -> dict | None:
-        """
-        Load one run's CSV and compute scalar features.
-
-        Returns None if the run should be skipped (missing path or load error).
-        Thread-safe: _read_csv uses no shared mutable state.
-        """
-        data_file = run.processed_file if file_type == "processed" else run.raw_file
-
-        if data_file is None or not data_file.path:
-            logger.warning(
-                "Run '%s' of assay '%s' has no %s data file path — skipping.",
-                run.run_id, assay.assay_id, file_type,
-            )
-            return None
-
-        cache_key = (assay.assay_id, run.run_id, file_type)
-        cached = self._cache.get(cache_key)
-
+        """Helper for threaded lifecycle feature extraction."""
         try:
+            data_file, resolved_file_type = self._resolve_data_file(
+                assay_id=assay.assay_id,
+                run=run,
+                requested_file_type=self._validate_file_type(file_type),
+            )
+            cache_key = (assay.assay_id, run.run_id, resolved_file_type)
+            cached = self._cache.get(cache_key)
             if cached is not None:
                 raw_values = self._get_value_column(cached)
             else:
@@ -245,7 +203,9 @@ class DataIntegrator:
         except DataFileError as exc:
             logger.warning(
                 "Skipping run '%s' of assay '%s': %s",
-                run.run_id, assay.assay_id, exc,
+                run.run_id,
+                assay.assay_id,
+                exc,
             )
             return None
 
@@ -264,47 +224,46 @@ class DataIntegrator:
         self,
         assay: AssayModel,
         study_id: str,
-        file_type: Literal["raw", "processed"] = "processed",
+        file_type: Literal["raw", "processed", "auto"] = "processed",
         n_workers: int | None = None,
     ) -> pd.DataFrame:
-        """
-        Load all runs and return a lifecycle feature summary DataFrame.
-
-        Columns: run_id, run_number, study_id, assay_id,
-                 rms, max, mean, peak2peak, kurtosis, std, crest_factor, skewness,
-                 fv_<factor_name> for each factor.
-
-        Parameters
-        ----------
-        n_workers : int | None
-            Number of threads for parallel CSV loading.  None (default) lets
-            the executor choose (``min(32, cpu_count + 4)``).  Pass 1 to
-            force sequential loading.
-
-        Returns an empty DataFrame if no runs could be loaded.
-        """
-        effective_workers = n_workers if n_workers is not None else min(32, (os.cpu_count() or 1) + 4)
+        """Return lifecycle features for all runs as a DataFrame."""
+        requested_file_type = self._validate_file_type(file_type)
+        effective_workers = (
+            n_workers if n_workers is not None else min(32, (os.cpu_count() or 1) + 4)
+        )
 
         if effective_workers == 1 or len(assay.runs) <= 1:
-            # Sequential path — preserves streaming memory behaviour.
-            rows = list(self.stream_lifecycle_features(assay, study_id, file_type))
+            rows = list(
+                self.stream_lifecycle_features(
+                    assay=assay,
+                    study_id=study_id,
+                    file_type=requested_file_type,
+                )
+            )
         else:
             rows_unordered: list[dict] = []
             with ThreadPoolExecutor(max_workers=effective_workers) as pool:
                 futures = {
-                    pool.submit(self._compute_run_features, run, assay, study_id, file_type): run
+                    pool.submit(
+                        self._compute_run_features,
+                        run,
+                        assay,
+                        study_id,
+                        requested_file_type,
+                    ): run
                     for run in assay.runs
                 }
                 for future in as_completed(futures):
                     result = future.result()
                     if result is not None:
                         rows_unordered.append(result)
-            # Restore run order (futures complete in arbitrary order).
             rows = sorted(rows_unordered, key=lambda r: r["run_number"])
 
         if not rows:
             logger.warning(
-                "No lifecycle features extracted for assay '%s'.", assay.assay_id
+                "No lifecycle features extracted for assay '%s'.",
+                assay.assay_id,
             )
             return pd.DataFrame()
         return pd.DataFrame(rows)
@@ -314,7 +273,7 @@ class DataIntegrator:
     # ------------------------------------------------------------------
 
     def clear_cache(self) -> None:
-        """Evict all cached DataFrames to free memory."""
+        """Evict all cached DataFrames."""
         n = len(self._cache)
         self._cache.clear()
         logger.info("DataIntegrator cache cleared (%d entries removed).", n)
@@ -324,7 +283,6 @@ class DataIntegrator:
     # ------------------------------------------------------------------
 
     def _resolve_run(self, assay: AssayModel, run_id: str | None) -> RunRecord:
-        """Return the RunRecord for run_id, or auto-select for single-run assays."""
         if run_id is None:
             if len(assay.runs) == 1:
                 return assay.runs[0]
@@ -334,7 +292,7 @@ class DataIntegrator:
                 )
             raise AmbiguousRunError(
                 f"Assay '{assay.assay_id}' has {len(assay.runs)} runs. "
-                f"Specify run_id= explicitly. "
+                "Specify run_id explicitly. "
                 f"Available: {[r.run_id for r in assay.runs]}"
             )
 
@@ -347,46 +305,54 @@ class DataIntegrator:
             )
         return run
 
-    def _load_run(
-        self,
-        assay: AssayModel,
-        study_id: str,
-        run: RunRecord,
+    @staticmethod
+    def _validate_file_type(
         file_type: str,
-    ) -> pd.DataFrame:
-        """Load one run from disk and return a (time, value) DataFrame."""
-        data_file: DataFile | None = (
-            run.processed_file if file_type == "processed" else run.raw_file
-        )
-
-        if data_file is None or not data_file.path:
+    ) -> Literal["raw", "processed", "auto"]:
+        normalized = str(file_type).strip().lower()
+        if normalized not in REQUESTED_FILE_TYPES:
             raise DataFileError(
-                f"Assay '{assay.assay_id}', run '{run.run_id}': "
-                f"no '{file_type}' data file is recorded in the ISA-JSON. "
-                f"Use file_type='raw' or file_type='processed' to match what the ISA-JSON contains."
+                f"Invalid file_type '{file_type}'. "
+                f"Use one of: {REQUESTED_FILE_TYPES}."
             )
-
-        df = self._read_csv(Path(data_file.path))
-        self._normalize_time(df, run)
-        return df
+        return cast(Literal["raw", "processed", "auto"], normalized)
 
     @staticmethod
-    def _normalize_time(df: pd.DataFrame, run: "RunRecord") -> None:
-        """
-        Re-scale the ``time`` column to seconds, in-place.
+    def _resolve_data_file(
+        assay_id: str,
+        run: RunRecord,
+        requested_file_type: Literal["raw", "processed", "auto"],
+    ) -> tuple[DataFile, Literal["raw", "processed"]]:
+        if requested_file_type == "auto":
+            if run.processed_file is not None and run.processed_file.path:
+                return run.processed_file, "processed"
+            if run.raw_file is not None and run.raw_file.path:
+                return run.raw_file, "raw"
+            raise DataFileError(
+                f"Assay '{assay_id}', run '{run.run_id}': no data file is recorded "
+                "in the ISA-JSON (neither 'processed' nor 'raw')."
+            )
 
-        If the ISA-JSON protocol parameters declare a sampling frequency (Hz or
-        kHz), use it to convert the raw numeric timestamp column::
+        resolved_file_type = cast(
+            Literal["raw", "processed"],
+            requested_file_type,
+        )
+        data_file = (
+            run.processed_file if resolved_file_type == "processed" else run.raw_file
+        )
+        if data_file is None or not data_file.path:
+            raise DataFileError(
+                f"Assay '{assay_id}', run '{run.run_id}': "
+                f"no '{resolved_file_type}' data file is recorded in the ISA-JSON. "
+                "Use file_type='auto' to prefer processed and fall back to raw."
+            )
+        return data_file, resolved_file_type
 
-            dt_seconds = 1 / fs
-            scale = dt_seconds / median_raw_dt
-            time_seconds = (time_raw - time_raw[0]) * scale
-
-        When no fs is declared the column is only zeroed (start = 0) and left
-        in whatever units the CSV uses.
-        """
+    @staticmethod
+    def _normalize_time(df: pd.DataFrame, run: RunRecord) -> None:
+        """Scale/shift time column to seconds in-place when sampling freq is known."""
         t = df["time"]
-        # Infer fs from run measurement params (same logic as AssayProxy._infer_fs)
+
         fs: float | None = None
         for pv in run.measurement_params:
             if pv.unit and ("hz" in pv.unit.lower()):
@@ -404,36 +370,21 @@ class DataIntegrator:
                 scale = (1.0 / fs) / dt_raw
                 df["time"] = (t - t0) * scale
                 return
-        # No fs available — just zero-base the column
+
         df["time"] = t - t0
 
     def _read_csv(self, path: Path) -> pd.DataFrame:
-        """
-        Read a 2-column measurement CSV/TSV into a DataFrame.
-
-        Returns a DataFrame with columns named "time" and "value",
-        where "time" is always float64 (seconds) and "value" is float64.
-
-        Fast path: tries the C engine with explicit separators (no sniffing).
-        Sniffing via engine="python" is only used as a last resort — it is
-        ~10–20× slower per file and holds the GIL, which kills thread parallelism.
-
-        Raises
-        ------
-        DataFileError
-            File not found, encoding failure, shape mismatch, or empty file.
-        """
+        """Read a 2-column measurement CSV/TSV into [time, value]."""
         if not path.exists():
             raise DataFileError(
                 f"Data file not found: '{path}'. "
-                f"Set data_root to the directory containing your measurement files."
+                "Set data_root to the directory containing your measurement files."
             )
 
         logger.debug("Reading CSV: '%s'.", path)
-
         df: pd.DataFrame | None = None
 
-        # --- Fast path: C engine, no delimiter sniffing, releases the GIL ---
+        # Fast path: C engine with explicit common separators.
         for sep in (",", "\t", ";"):
             for encoding in ("utf-8", "latin-1"):
                 try:
@@ -456,7 +407,42 @@ class DataIntegrator:
             if df is not None:
                 break
 
-        # --- Slow fallback: Python engine with auto-detection (handles exotic formats) ---
+        # Fallback 1: sniff delimiter once, then retry C engine.
+        if df is None:
+            sniff_sep: str | None = None
+            for encoding in ("utf-8", "latin-1"):
+                try:
+                    sample = path.read_text(encoding=encoding)
+                    sample = sample[:32768]
+                    sniff_sep = csv.Sniffer().sniff(
+                        sample,
+                        delimiters=",\t;| ",
+                    ).delimiter
+                    break
+                except (UnicodeDecodeError, csv.Error, OSError):
+                    continue
+
+            if sniff_sep:
+                for encoding in ("utf-8", "latin-1"):
+                    try:
+                        candidate = pd.read_csv(
+                            path,
+                            sep=sniff_sep,
+                            engine="c",
+                            encoding=encoding,
+                            header=None,
+                            dtype=str,
+                            on_bad_lines="warn",
+                        )
+                        if candidate.shape[1] >= 2:
+                            df = candidate
+                            break
+                    except UnicodeDecodeError:
+                        continue
+                    except Exception:
+                        break
+
+        # Fallback 2: Python engine with auto-detection.
         if df is None:
             for encoding in ("utf-8", "latin-1"):
                 try:
@@ -473,9 +459,7 @@ class DataIntegrator:
                 except UnicodeDecodeError:
                     continue
                 except Exception as exc:
-                    raise DataFileError(
-                        f"Failed to read '{path}' as CSV: {exc}"
-                    ) from exc
+                    raise DataFileError(f"Failed to read '{path}' as CSV: {exc}") from exc
             else:
                 raise DataFileError(
                     f"Cannot decode '{path}'. Tried UTF-8 and Latin-1."
@@ -484,7 +468,7 @@ class DataIntegrator:
         if df is None or df.empty:
             raise DataFileError(f"Data file is empty: '{path}'.")
 
-        # Drop header row if first row is non-numeric (e.g. 'timestamp,value').
+        # Drop header row if first row is non-numeric (e.g. timestamp,value).
         if not _is_numeric_row(df.iloc[0]):
             df = df.iloc[1:].reset_index(drop=True)
 
@@ -494,36 +478,27 @@ class DataIntegrator:
         if df.shape[1] < 2:
             raise DataFileError(
                 f"Data file '{path}' has only {df.shape[1]} column(s). "
-                f"ISA-PHM one-column rule requires exactly 2 columns: time + value."
+                "ISA-PHM one-column rule requires exactly 2 columns: time + value."
             )
 
         if df.shape[1] > 2:
-            logger.warning(
-                "'%s' has %d columns; using first two as (time, value).",
-                path, df.shape[1],
-            )
+            logger.warning("'%s' has %d columns; using first two as (time, value).", path, df.shape[1])
 
         df = df.iloc[:, :2].copy()
         df.columns = ["time", "value"]
-
         df["value"] = pd.to_numeric(df["value"], errors="coerce")
         df["time"] = _to_float_seconds(df["time"])
-
         return df
 
     @staticmethod
     def _get_value_column(df: pd.DataFrame) -> pd.Series:
-        """Return the 'value' column, or the second column if 'value' is absent."""
         if "value" in df.columns:
             return df["value"]
         return df.iloc[:, 1]
 
-# ---------------------------------------------------------------------------
-# Helper
-# ---------------------------------------------------------------------------
 
 def _is_numeric_row(row: pd.Series) -> bool:
-    """Return True if all values in the row look numeric."""
+    """Return True if all values in row parse as numeric."""
     try:
         pd.to_numeric(row, errors="raise")
         return True
@@ -532,17 +507,10 @@ def _is_numeric_row(row: pd.Series) -> bool:
 
 
 def _to_float_seconds(series: pd.Series) -> pd.Series:
-    """
-    Convert a time column to float64.
-
-    Handles:
-    - Already-numeric values (returned as-is; unit normalised later by _normalize_time)
-    - Timedelta strings: HH:MM:SS.ffffff  →  total_seconds()
-    """
+    """Convert time column to float seconds where possible."""
     numeric = pd.to_numeric(series, errors="coerce")
     if numeric.notna().all():
         return numeric
-    # Fall back to timedelta parsing (covers HH:MM:SS.ffffff).
     try:
         return pd.to_timedelta(series).dt.total_seconds()
     except Exception:

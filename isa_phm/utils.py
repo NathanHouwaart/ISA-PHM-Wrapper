@@ -44,6 +44,7 @@ class ReferenceResolver:
 
     def __init__(self) -> None:
         self._index: dict[str, dict] = {}
+        self._warned_duplicates: set[str] = set()
 
     # ------------------------------------------------------------------
     # Building the index
@@ -322,9 +323,22 @@ def fix_outliers(
         v[mask] = np.nan
     elif strategy == "drop":
         v = v[~mask]
+    elif strategy in ("interpolate", "ffill", "bfill"):
+        # Replace flagged samples with NaN first, then fill using pandas
+        import pandas as pd  # local import — utils has no top-level pandas dep
+        s = pd.Series(v)
+        s[mask] = np.nan
+        if strategy == "interpolate":
+            s = s.interpolate(method="linear", limit_direction="both")
+        elif strategy == "ffill":
+            s = s.ffill().bfill()  # bfill handles leading NaNs
+        else:  # bfill
+            s = s.bfill().ffill()  # ffill handles trailing NaNs
+        v = s.to_numpy(dtype=np.float64)
     else:
         raise ValueError(
-            f"Unknown fix strategy: '{strategy}'. Use 'clip', 'nan', or 'drop'."
+            f"Unknown fix strategy: '{strategy}'. "
+            "Use 'clip', 'nan', 'drop', 'interpolate', 'ffill', or 'bfill'."
         )
     return v
 

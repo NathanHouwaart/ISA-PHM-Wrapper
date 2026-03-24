@@ -13,6 +13,7 @@ Covers:
 from __future__ import annotations
 
 import csv
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import numpy as np
@@ -207,3 +208,114 @@ class TestLifecycleStreaming:
 
         df = integrator.lifecycle_features_df(assay, study_id=study.study_id)
         assert "run_id" in df.columns
+
+
+# ---------------------------------------------------------------------------
+# file_type contract + metadata
+# ---------------------------------------------------------------------------
+
+class TestFileTypeContract:
+    def test_invalid_file_type_raises(self, minimal_single_run_isa_file, tmp_path):
+        raw = ISAParser(strict=False).load(minimal_single_run_isa_file)
+        inv = _make_investigation(raw, tmp_path)
+        study = inv.studies[0]
+        assay = study.assays[0]
+        integrator = _build_integrator(tmp_path)
+
+        with pytest.raises(DataFileError, match="Invalid file_type"):
+            integrator.load(assay, study_id=study.study_id, file_type="banana")
+
+    def test_auto_reports_processed_when_available(
+        self, minimal_single_run_isa_file, tmp_path
+    ):
+        raw = ISAParser(strict=False).load(minimal_single_run_isa_file)
+        inv = _make_investigation(raw, tmp_path)
+        study = inv.studies[0]
+        assay = study.assays[0]
+        integrator = _build_integrator(tmp_path)
+
+        df, meta = integrator.load_with_meta(
+            assay,
+            study_id=study.study_id,
+            file_type="auto",
+        )
+        assert list(df.columns) == ["time", "value"]
+        assert meta.requested_file_type == "auto"
+        assert meta.resolved_file_type == "processed"
+        assert meta.from_cache is False
+
+    def test_auto_falls_back_to_raw_and_reports_resolved_type(
+        self, minimal_single_run_isa_file, tmp_csv, tmp_path
+    ):
+        raw = ISAParser(strict=False).load(minimal_single_run_isa_file)
+        assay = raw["studies"][0]["assays"][0]
+        for data_file in assay["dataFiles"]:
+            if data_file.get("type") == "Raw Data File":
+                data_file["name"] = str(tmp_csv)
+            elif data_file.get("type") == "Processed Data File":
+                data_file["name"] = ""
+
+        inv = _make_investigation(raw, tmp_path)
+        study = inv.studies[0]
+        assay_model = study.assays[0]
+        integrator = _build_integrator(tmp_path)
+
+        _, meta = integrator.load_with_meta(
+            assay_model,
+            study_id=study.study_id,
+            file_type="auto",
+        )
+        assert meta.requested_file_type == "auto"
+        assert meta.resolved_file_type == "raw"
+        assert meta.file_path == str(tmp_csv)
+
+    def test_processed_does_not_implicitly_fallback_to_raw(
+        self, minimal_single_run_isa_file, tmp_csv, tmp_path
+    ):
+        raw = ISAParser(strict=False).load(minimal_single_run_isa_file)
+        assay = raw["studies"][0]["assays"][0]
+        for data_file in assay["dataFiles"]:
+            if data_file.get("type") == "Raw Data File":
+                data_file["name"] = str(tmp_csv)
+            elif data_file.get("type") == "Processed Data File":
+                data_file["name"] = ""
+
+        inv = _make_investigation(raw, tmp_path)
+        study = inv.studies[0]
+        assay_model = study.assays[0]
+        integrator = _build_integrator(tmp_path)
+
+        with pytest.raises(DataFileError, match="no 'processed' data file"):
+            integrator.load(assay_model, study_id=study.study_id, file_type="processed")
+
+
+# ---------------------------------------------------------------------------
+# Concurrency
+# ---------------------------------------------------------------------------
+
+class TestConcurrentLoads:
+    def test_parallel_repeated_loads_are_stable(
+        self, minimal_multi_run_isa_file, tmp_csv_dir
+    ):
+        raw = ISAParser(strict=False).load(minimal_multi_run_isa_file)
+        inv = _make_investigation(raw, tmp_csv_dir)
+        study = inv.studies[0]
+        assay = study.assays[0]
+        integrator = _build_integrator(tmp_csv_dir)
+
+        def _job() -> tuple[int, list[str], str]:
+            df, meta = integrator.load_with_meta(
+                assay,
+                study_id=study.study_id,
+                run_id="run_01",
+                file_type="auto",
+            )
+            return len(df), list(df.columns), meta.resolved_file_type
+
+        with ThreadPoolExecutor(max_workers=8) as pool:
+            results = list(pool.map(lambda _: _job(), range(32)))
+
+        assert len(results) == 32
+        assert all(r[0] > 0 for r in results)
+        assert all(r[1] == ["time", "value"] for r in results)
+        assert all(r[2] == "processed" for r in results)

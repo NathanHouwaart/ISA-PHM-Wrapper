@@ -187,3 +187,48 @@ class TestExtractorRealFixtures:
         # Case 1 assay should have 17 runs.
         first_study = next(s for s in inv.studies if s.title == "Case 1")
         assert first_study.assays[0].run_count == 17
+
+
+# ---------------------------------------------------------------------------
+# Process-chain hard failures
+# ---------------------------------------------------------------------------
+
+class TestProcessChainHardFailures:
+    def test_cycle_in_process_chain_raises(self, extractor, minimal_single_run_isa):
+        assay = minimal_single_run_isa["studies"][0]["assays"][0]
+        proc_seq = assay["processSequence"]
+        meas = proc_seq[0]
+        proc = proc_seq[1]
+        proc["nextProcess"] = {"@id": meas["@id"]}
+
+        with pytest.raises(ExtractionError, match="Cycle detected"):
+            extractor.extract(minimal_single_run_isa)
+
+    def test_unreachable_processes_raise(self, extractor, minimal_single_run_isa):
+        assay = minimal_single_run_isa["studies"][0]["assays"][0]
+        proc_seq = assay["processSequence"]
+        meas = proc_seq[0]
+        proc = proc_seq[1]
+
+        cycle_a = {
+            "@id": "#process/cycle_a",
+            "executesProtocol": proc["executesProtocol"],
+            "inputs": [{"@id": "#data_file/raw0"}],
+            "outputs": [{"@id": "#data_file/proc0"}],
+            "parameterValues": [],
+            "previousProcess": {"@id": "#process/cycle_b"},
+            "nextProcess": {"@id": "#process/cycle_b"},
+        }
+        cycle_b = {
+            "@id": "#process/cycle_b",
+            "executesProtocol": meas["executesProtocol"],
+            "inputs": [{"@id": "#sample/s1"}],
+            "outputs": [{"@id": "#data_file/raw0"}],
+            "parameterValues": [],
+            "previousProcess": {"@id": "#process/cycle_a"},
+            "nextProcess": {"@id": "#process/cycle_a"},
+        }
+        proc_seq.extend([cycle_a, cycle_b])
+
+        with pytest.raises(ExtractionError, match="did not cover all processes"):
+            extractor.extract(minimal_single_run_isa)

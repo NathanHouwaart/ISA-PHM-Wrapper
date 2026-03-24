@@ -15,6 +15,7 @@ Covers:
 
 from __future__ import annotations
 
+import copy
 import json
 import numpy as np
 import pandas as pd
@@ -26,6 +27,7 @@ from isa_phm.errors import (
     DataFileError,
     StudyNotFoundError,
     RunNotFoundError,
+    ValidationError,
 )
 from isa_phm.integrator import DataIntegrator
 from isa_phm.extractor import MetadataExtractor
@@ -105,6 +107,25 @@ class TestQueryNavigator:
         nav, _ = _build_navigator(minimal_single_run_isa_file, tmp_path)
         with pytest.raises(StudyNotFoundError):
             nav.study("nonexistent study title xxxx")
+
+    def test_duplicate_normalized_study_titles_raise_validation_error(
+        self, minimal_single_run_isa, tmp_csv, tmp_path
+    ):
+        isa = minimal_single_run_isa
+        for data_file in isa["studies"][0]["assays"][0]["dataFiles"]:
+            if data_file.get("type") == "Processed Data File":
+                data_file["name"] = str(tmp_csv)
+
+        study_copy = copy.deepcopy(isa["studies"][0])
+        study_copy["identifier"] = "st2-uuid"
+        study_copy["title"] = "  test study  "
+        isa["studies"].append(study_copy)
+
+        p = tmp_path / "i_dup_study_title.json"
+        p.write_text(json.dumps(isa), encoding="utf-8")
+
+        with pytest.raises(ValidationError, match="Duplicate normalized study title"):
+            _build_navigator(p, tmp_path)
 
 
 # ---------------------------------------------------------------------------
@@ -512,3 +533,61 @@ class TestAssayProxyParamListing:
         assert len(df) == 1
         assert df.at[0, "parameter_name"] == "Window size"
         assert df.at[0, "value"] == 1024
+
+
+class TestAssayProxyUnitInference:
+    @staticmethod
+    def _mutate_measurement_value(base_file, tmp_path, value) -> object:
+        raw = json.loads(base_file.read_text(encoding="utf-8"))
+        assay = raw["studies"][0]["assays"][0]
+        for proc in assay["processSequence"]:
+            inputs = proc.get("inputs", [])
+            if inputs and inputs[0].get("@id", "").startswith("#sample/"):
+                proc["parameterValues"][0]["value"] = value
+                break
+        p = tmp_path / f"i_unit_value_{str(value).replace('/', '_')}.json"
+        p.write_text(json.dumps(raw), encoding="utf-8")
+        return p
+
+    def test_non_alpha_short_value_is_not_inferred_as_unit(
+        self, minimal_params_isa_file, tmp_path
+    ):
+        isa_file = self._mutate_measurement_value(minimal_params_isa_file, tmp_path, "v2")
+        nav, _ = _build_navigator(isa_file, tmp_path)
+        assay = nav.study("Test Study").assay("a_st01_se01")
+        assert assay._infer_unit() is None
+
+    def test_alpha_short_value_can_be_inferred_as_unit(
+        self, minimal_params_isa_file, tmp_path
+    ):
+        isa_file = self._mutate_measurement_value(minimal_params_isa_file, tmp_path, "nm")
+        nav, _ = _build_navigator(isa_file, tmp_path)
+        assay = nav.study("Test Study").assay("a_st01_se01")
+        assert assay._infer_unit() == "nm"
+
+
+class TestStudyProxyExportLabeledDataset:
+    def test_export_labeled_dataset_reports_skipped_runs(
+        self, minimal_multi_run_isa, tmp_csv_dir, tmp_path
+    ):
+        isa = minimal_multi_run_isa
+        for data_file in isa["studies"][0]["assays"][0]["dataFiles"]:
+            if (
+                data_file.get("type") == "Processed Data File"
+                and data_file.get("name", "").endswith("run_03.csv")
+            ):
+                data_file["name"] = str(tmp_csv_dir / "missing_run_03.csv")
+
+        p = tmp_path / "i_export_missing_run.json"
+        p.write_text(json.dumps(isa), encoding="utf-8")
+
+        nav, _ = _build_navigator(p, tmp_csv_dir)
+        study = nav.study("Test Study")
+        df = study.export_labeled_dataset(file_type="processed")
+
+        summary = df.attrs.get("export_summary")
+        assert summary is not None
+        assert summary["n_total_runs"] == 3
+        assert summary["n_loaded_runs"] == 2
+        assert summary["n_skipped_runs"] == 1
+        assert len(summary["skipped_runs"]) == 1

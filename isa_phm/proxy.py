@@ -31,6 +31,7 @@ from .errors import (
     PlotError,
     RunNotFoundError,
     StudyNotFoundError,
+    ValidationError,
 )
 from .schemas import (
     AssayModel,
@@ -57,6 +58,7 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger("isa_phm")
 _FAULT_TYPE_RE = re.compile(r"\b(fault|damage|rul|defect|degradation)\b", re.IGNORECASE)
+_UNIT_VALUE_RE = re.compile(r"^[A-Za-z]{1,8}$")
 
 
 # ---------------------------------------------------------------------------
@@ -95,7 +97,15 @@ class QueryNavigator:
         self._by_title_lower: dict[str, StudyModel] = {}
         for s in investigation.studies:
             self._by_uuid[s.study_id] = s
-            self._by_title_lower[s.title.strip().lower()] = s
+            key = s.title.strip().lower()
+            existing = self._by_title_lower.get(key)
+            if existing is not None and existing.study_id != s.study_id:
+                raise ValidationError(
+                    "Duplicate normalized study title detected. "
+                    f"Both '{existing.title}' ({existing.study_id}) and "
+                    f"'{s.title}' ({s.study_id}) map to key '{key}'."
+                )
+            self._by_title_lower[key] = s
 
     # Public API mirrors ISAWrapper for convenience.
 
@@ -626,11 +636,20 @@ class StudyProxy:
         Returns
         -------
         pd.DataFrame
+
+        Notes
+        -----
+        Export diagnostics are attached to ``df.attrs['export_summary']`` with:
+        ``n_target_assays``, ``n_total_runs``, ``n_loaded_runs``,
+        ``n_skipped_runs``, and ``skipped_runs``.
         """
         target_assays = [
             a for a in self._study.assays
             if sensors is None or a.sensor.alias in sensors
         ]
+        n_total_runs = sum(len(a.runs) for a in target_assays)
+        n_skipped_runs = 0
+        skipped_runs: list[dict[str, str]] = []
         frames: list[pd.DataFrame] = []
         for a_model in target_assays:
             a = self._assay_proxy(a_model)
@@ -646,6 +665,14 @@ class StudyProxy:
                     logger.warning(
                         "export_labeled_dataset: skipping assay '%s' run '%s': %s",
                         a_model.assay_id, run.run_id, exc,
+                    )
+                    n_skipped_runs += 1
+                    skipped_runs.append(
+                        {
+                            "assay_id": a_model.assay_id,
+                            "run_id": run.run_id,
+                            "reason": str(exc),
+                        }
                     )
                     continue
                 if outlier_method is not None:
@@ -666,8 +693,24 @@ class StudyProxy:
                     df[factor_name] = factor_val
                 frames.append(df)
         if not frames:
-            return pd.DataFrame()
-        return pd.concat(frames, ignore_index=True)
+            out = pd.DataFrame()
+        else:
+            out = pd.concat(frames, ignore_index=True)
+
+        if n_skipped_runs > 0:
+            logger.warning(
+                "export_labeled_dataset: skipped %d/%d runs due to file errors.",
+                n_skipped_runs,
+                n_total_runs,
+            )
+        out.attrs["export_summary"] = {
+            "n_target_assays": len(target_assays),
+            "n_total_runs": n_total_runs,
+            "n_loaded_runs": n_total_runs - n_skipped_runs,
+            "n_skipped_runs": n_skipped_runs,
+            "skipped_runs": skipped_runs,
+        }
+        return out
 
     def load_multi_sensor_dataframe(
         self,
@@ -1508,8 +1551,7 @@ class AssayProxy:
             if (
                 not pv.unit
                 and isinstance(pv.value, str)
-                and 1 <= len(pv.value.strip()) <= 8
-                and not pv.value.strip().replace(".", "").replace("-", "").isdigit()
+                and _UNIT_VALUE_RE.fullmatch(pv.value.strip()) is not None
                 and pv.value.strip().lower() not in self._SKIP_UNITS
             ):
                 return pv.value.strip()

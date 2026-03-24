@@ -20,6 +20,13 @@ from pathlib import Path
 from .errors import ParseError, ValidationError
 
 logger = logging.getLogger("isa_phm")
+_MIN_TOP_LEVEL_KEYS = (
+    "title",
+    "description",
+    "identifier",
+    "studies",
+    "ontologySourceReferences",
+)
 
 # Optional isatools import — required in strict mode.
 try:
@@ -120,6 +127,7 @@ class ISAParser:
             raise ParseError(
                 f"ISA-JSON root must be a JSON object (dict), got {type(raw).__name__}."
             )
+        self._validate_minimum_keys(raw, source_hint)
 
         # Step 2: isatools validation
         if self._strict:
@@ -149,3 +157,11 @@ class ISAParser:
             raise ValidationError(
                 f"ISA-JSON schema validation failed for '{source_hint}': {exc}"
             ) from exc
+
+    def _validate_minimum_keys(self, raw: dict, source_hint: str) -> None:
+        """Fail fast on obviously incomplete ISA-JSON root objects."""
+        missing = [k for k in _MIN_TOP_LEVEL_KEYS if k not in raw]
+        if missing:
+            raise ParseError(
+                f"ISA-JSON '{source_hint}' is missing required top-level keys: {missing}."
+            )

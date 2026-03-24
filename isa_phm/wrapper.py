@@ -21,6 +21,7 @@ Example usage::
 
 from __future__ import annotations
 
+import json
 import logging
 from datetime import datetime, timezone
 from pathlib import Path
@@ -545,7 +546,7 @@ class ISAWrapper:
         Checks include structure completeness, file references, metadata quality,
         and semantic coverage.
         """
-        issues: list[ValidationIssue] = []
+        issue_buckets: dict[tuple[str, str, str], dict[str, Any]] = {}
 
         def add_issue(
             *,
@@ -555,15 +556,32 @@ class ISAWrapper:
             message: str,
             context: dict[str, Any] | None = None,
         ) -> None:
-            issues.append(
-                ValidationIssue(
-                    code=code,
-                    level=level,
-                    scope=scope,
-                    message=message,
-                    context=context or {},
-                )
-            )
+            payload = context or {}
+            payload_key = json.dumps(payload, sort_keys=True, default=str)
+            bucket_key = (code, level, message)
+            bucket = issue_buckets.get(bucket_key)
+            if bucket is None:
+                issue_buckets[bucket_key] = {
+                    "code": code,
+                    "level": level,
+                    "message": message,
+                    "context": dict(payload),
+                    "context_keys": {payload_key},
+                    "contexts_sample": [dict(payload)],
+                    "scopes": [scope],
+                    "scope_set": {scope},
+                    "n_occurrences": 1,
+                }
+                return
+
+            bucket["n_occurrences"] += 1
+            if scope not in bucket["scope_set"]:
+                bucket["scope_set"].add(scope)
+                bucket["scopes"].append(scope)
+            if payload_key not in bucket["context_keys"]:
+                bucket["context_keys"].add(payload_key)
+                if len(bucket["contexts_sample"]) < 10:
+                    bucket["contexts_sample"].append(dict(payload))
 
         inv = self._investigation
         if not inv.title.strip():
@@ -779,6 +797,32 @@ class ISAWrapper:
                         "require_override_config": require_override_config,
                     },
                 )
+
+        issues: list[ValidationIssue] = []
+        for bucket in issue_buckets.values():
+            scopes: list[str] = bucket["scopes"]
+            context_payload: dict[str, Any] = dict(bucket["context"])
+            n_occurrences = int(bucket["n_occurrences"])
+
+            if n_occurrences > 1:
+                context_payload["n_occurrences"] = n_occurrences
+                context_payload["scopes_sample"] = scopes[:10]
+                context_payload["n_unique_scopes"] = len(scopes)
+                if len(bucket["contexts_sample"]) > 1:
+                    context_payload["contexts_sample"] = bucket["contexts_sample"]
+                scope_value = "multiple"
+            else:
+                scope_value = scopes[0]
+
+            issues.append(
+                ValidationIssue(
+                    code=bucket["code"],
+                    level=bucket["level"],
+                    scope=scope_value,
+                    message=bucket["message"],
+                    context=context_payload,
+                )
+            )
 
         n_errors = sum(1 for issue in issues if issue.level == "error")
         n_warnings = sum(1 for issue in issues if issue.level == "warning")

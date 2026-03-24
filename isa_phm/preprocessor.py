@@ -218,12 +218,16 @@ class ISAPreprocessor:
             # Windows absolute path — check if it exists on the current OS.
             win_path = Path(name)
             if win_path.exists():
+                # Enforce traversal policy against the resolved on-disk target.
+                self._check_traversal(win_path.resolve(strict=False), entity_id)
                 return str(win_path), False  # Already correct on this machine.
 
             # Fall back: find just the filename under data_root.
             filename = PureWindowsPath(name).name
             candidate = self._data_root / filename
             if candidate.exists():
+                # Harden fallback: validate the resolved target (symlinks included).
+                self._check_traversal(candidate.resolve(strict=False), entity_id)
                 return str(candidate), True
 
             # Cannot resolve, but don't fail — DataFileError at load time.
@@ -239,7 +243,7 @@ class ISAPreprocessor:
         raw_path = Path(name)
         if raw_path.is_absolute():
             if raw_path.exists():
-                self._check_traversal(raw_path, entity_id)
+                self._check_traversal(raw_path.resolve(strict=False), entity_id)
                 return str(raw_path), False
             # Absolute but doesn't exist — leave as-is.
             return str(raw_path), False

@@ -34,6 +34,8 @@ import logging
 from pathlib import Path
 from typing import Any
 
+from pydantic import ValidationError as PydanticValidationError
+
 from .errors import ExtractionError
 from .schemas import (
     AssayModel,
@@ -685,8 +687,12 @@ def _extract_runs(
         for pv in proc.get("parameterValues", []):
             try:
                 meas_params.append(_resolve_param_value(pv, param_def_index, resolver))
-            except Exception as exc:
-                logger.debug("Could not resolve parameterValue: %s", exc)
+            except (TypeError, ValueError, KeyError, AttributeError, PydanticValidationError) as exc:
+                logger.warning(
+                    "Skipping invalid measurement parameterValue in process '%s': %s",
+                    proc.get("@id", "?"),
+                    exc,
+                )
 
         # --- Processing process (next in chain) ---
         proc_file: DataFile | None = None
@@ -712,8 +718,18 @@ def _extract_runs(
                         proc_params.append(
                             _resolve_param_value(pv, param_def_index, resolver)
                         )
-                    except Exception as exc:
-                        logger.debug("Could not resolve parameterValue: %s", exc)
+                    except (
+                        TypeError,
+                        ValueError,
+                        KeyError,
+                        AttributeError,
+                        PydanticValidationError,
+                    ) as exc:
+                        logger.warning(
+                            "Skipping invalid processing parameterValue in process '%s': %s",
+                            next_proc.get("@id", "?"),
+                            exc,
+                        )
 
                 i += 2  # Consumed both measurement and processing.
             else:

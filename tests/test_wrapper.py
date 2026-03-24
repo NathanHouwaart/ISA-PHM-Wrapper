@@ -7,7 +7,7 @@ import pytest
 
 from isa_phm import ISAWrapper
 from isa_phm.errors import ValidationError
-from isa_phm.schemas import DatasetValidationReport
+from isa_phm.schemas import DatasetValidationReport, OutlierReport
 
 
 class TestISAWrapperSummaries:
@@ -247,6 +247,64 @@ class TestValidateDataset:
         assert report.ok is False
         codes = {issue.code for issue in report.issues}
         assert "SEM_UNKNOWN_RATIO_EXCEEDED" in codes
+
+    def test_validate_dataset_deduplicates_repeated_file_not_found(
+        self, minimal_multi_run_isa_file, tmp_csv_dir
+    ):
+        for p in tmp_csv_dir.glob("run_*.csv"):
+            p.unlink()
+
+        wrapper = ISAWrapper(
+            minimal_multi_run_isa_file,
+            data_root=tmp_csv_dir,
+            strict_validation=False,
+        )
+        report = wrapper.validate_dataset(check_files=True)
+        file_issues = [issue for issue in report.issues if issue.code == "FILE_NOT_FOUND"]
+        assert len(file_issues) == 1
+        issue = file_issues[0]
+        assert issue.scope == "multiple"
+        assert issue.context["n_occurrences"] == 3
+        assert issue.context["n_unique_scopes"] == 3
+
+
+class TestOutlierReportDataFrame:
+    def test_outlier_dataframe_has_stable_columns_for_empty_and_nonempty(self):
+        empty = OutlierReport(
+            n_outliers=0,
+            pct_outliers=0.0,
+            method="iqr",
+            threshold=1.5,
+            by_column={},
+        )
+        non_empty = OutlierReport(
+            n_outliers=2,
+            pct_outliers=5.0,
+            method="iqr",
+            threshold=1.5,
+            by_column={
+                "value": {
+                    "n_outliers": 2,
+                    "lower_bound": -1.0,
+                    "upper_bound": 1.0,
+                }
+            },
+        )
+
+        df_empty = empty.to_dataframe()
+        df_non_empty = non_empty.to_dataframe()
+        expected = [
+            "column",
+            "n_outliers",
+            "pct_outliers",
+            "lower_bound",
+            "upper_bound",
+            "method",
+            "threshold",
+        ]
+        assert list(df_empty.columns) == expected
+        assert list(df_non_empty.columns) == expected
+        assert df_empty.at[0, "column"] == "__all__"
 
 
 class TestWrapperPerformanceOptions:

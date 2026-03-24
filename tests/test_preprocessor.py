@@ -127,6 +127,26 @@ class TestRule1PathResolution:
         with pytest.raises(PreprocessingError, match="[Tt]raversal|traversal|outside"):
             preprocessor.preprocess(raw)
 
+    def test_windows_fallback_symlink_outside_root_raises(self, tmp_path):
+        outside_target = tmp_path.parent / "outside_target.csv"
+        outside_target.write_text("1,2\n", encoding="utf-8")
+        symlink_candidate = tmp_path / "danger.csv"
+        try:
+            symlink_candidate.symlink_to(outside_target)
+        except (OSError, NotImplementedError):
+            pytest.skip("Symlink creation not supported on this platform.")
+
+        df = {
+            "@id": "#data_file/df1",
+            "comments": [],
+            "name": r"D:\missing\danger.csv",
+            "type": "Processed Data File",
+        }
+        raw = _bare_investigation([_bare_study([_bare_assay([df])])])
+        preprocessor = ISAPreprocessor(data_root=tmp_path)
+        with pytest.raises(PreprocessingError, match="[Tt]raversal|outside"):
+            preprocessor.preprocess(raw)
+
 
 # ---------------------------------------------------------------------------
 # Rule 2 — Normalize file extensions to lowercase

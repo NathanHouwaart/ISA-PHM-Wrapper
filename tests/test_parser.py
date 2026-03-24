@@ -70,6 +70,12 @@ class TestISAParserLoadString:
         with pytest.raises(ParseError):
             parser.load_string("[1, 2, 3]")
 
+    def test_missing_required_top_level_keys_raises_parse_error(self):
+        parser = ISAParser(strict=False)
+        bad = json.dumps({"title": "Only title", "studies": []})
+        with pytest.raises(ParseError, match="missing required top-level keys"):
+            parser.load_string(bad)
+
 
 class TestISAParserLoadFile:
     def test_file_not_found_raises_parse_error(self, tmp_path):

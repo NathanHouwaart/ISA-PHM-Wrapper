@@ -11,6 +11,8 @@ Covers:
 
 from __future__ import annotations
 
+import logging
+
 import pytest
 
 from isa_phm.errors import ExtractionError
@@ -252,3 +254,27 @@ class TestDataFileExistenceFreshness:
         tmp_csv.unlink()
         assert run.processed_file.exists_at_extract is True
         assert run.processed_file.exists is False
+
+
+class TestParameterValueResolution:
+    def test_invalid_parameter_value_is_warned_and_skipped(
+        self, extractor, minimal_params_isa_file, tmp_path, caplog
+    ):
+        from isa_phm.parser import ISAParser
+        from isa_phm.preprocessor import ISAPreprocessor
+
+        raw = ISAParser(strict=False).load(minimal_params_isa_file)
+        assay = raw["studies"][0]["assays"][0]
+        for proc in assay["processSequence"]:
+            inputs = proc.get("inputs", [])
+            if inputs and inputs[0].get("@id", "").startswith("#sample/"):
+                proc["parameterValues"][0]["value"] = {"bad": "shape"}
+                break
+
+        repaired, _ = ISAPreprocessor(data_root=tmp_path, auto_fix=True).preprocess(raw)
+        with caplog.at_level(logging.WARNING, logger="isa_phm"):
+            inv = extractor.extract(repaired)
+
+        run = inv.studies[0].assays[0].runs[0]
+        assert run.measurement_params == []
+        assert "Skipping invalid measurement parameterValue" in caplog.text

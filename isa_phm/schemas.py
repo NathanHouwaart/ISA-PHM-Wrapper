@@ -509,23 +509,37 @@ class OutlierReport(BaseModel):
         """Return outlier statistics as a display-ready DataFrame."""
         import pandas as pd
 
+        columns = [
+            "column",
+            "n_outliers",
+            "pct_outliers",
+            "lower_bound",
+            "upper_bound",
+            "method",
+            "threshold",
+        ]
         rows = [
             {
-                "column":       col,
-                "n_outliers":   info.get("n_outliers", self.n_outliers),
+                "column": col,
+                "n_outliers": info.get("n_outliers", self.n_outliers),
                 "pct_outliers": self.pct_outliers,
-                "lower_bound":  round(info.get("lower_bound", 0.0), 6),
-                "upper_bound":  round(info.get("upper_bound", 0.0), 6),
-                "method":       self.method,
-                "threshold":    self.threshold,
+                "lower_bound": round(info.get("lower_bound", 0.0), 6),
+                "upper_bound": round(info.get("upper_bound", 0.0), 6),
+                "method": self.method,
+                "threshold": self.threshold,
             }
             for col, info in self.by_column.items()
         ]
         if not rows:
-            rows = [{
-                "n_outliers": self.n_outliers,
-                "pct_outliers": self.pct_outliers,
-                "method": self.method,
-                "threshold": self.threshold,
-            }]
-        return pd.DataFrame(rows)
+            rows = [
+                {
+                    "column": "__all__",
+                    "n_outliers": self.n_outliers,
+                    "pct_outliers": self.pct_outliers,
+                    "lower_bound": None,
+                    "upper_bound": None,
+                    "method": self.method,
+                    "threshold": self.threshold,
+                }
+            ]
+        return pd.DataFrame(rows, columns=columns)

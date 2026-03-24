@@ -7,6 +7,11 @@
   - Added CI workflow (`.github/workflows/ci.yml`) with a Python 3.10-3.13 test matrix.
   - Added dependency upper bounds and expanded optional dependency groups (`dev`, `docs`, `notebooks`).
   - Added `pytest-xdist` and `pytest-timeout` to dev dependencies.
+- Performance and workflow:
+  - Added thread-safe cache-key locking in `DataIntegrator` to reduce duplicate concurrent loads.
+  - Added chunked large-file lifecycle feature mode with configurable threshold and chunk size.
+  - Added benchmark script: `scripts/benchmark_chunked_mode.py`.
+  - Standardized notebooks `11` and `12` to small-cell flows and added examples for `ai_context` and `validate_dataset`.
 
 ## 0.2.0 (2026-03-24)
 

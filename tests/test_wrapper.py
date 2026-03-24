@@ -247,3 +247,20 @@ class TestValidateDataset:
         assert report.ok is False
         codes = {issue.code for issue in report.issues}
         assert "SEM_UNKNOWN_RATIO_EXCEEDED" in codes
+
+
+class TestWrapperPerformanceOptions:
+    def test_wrapper_accepts_chunked_mode_configuration(
+        self, minimal_single_run_isa_file, tmp_path
+    ):
+        wrapper = ISAWrapper(
+            minimal_single_run_isa_file,
+            data_root=tmp_path,
+            strict_validation=False,
+            enable_chunked_large_file_mode=False,
+            large_file_threshold_mb=12.5,
+            chunk_rows=4096,
+        )
+        assert wrapper._integrator._enable_chunked_large_file_mode is False
+        assert wrapper._integrator._large_file_threshold_mb == 12.5
+        assert wrapper._integrator._chunk_rows == 4096

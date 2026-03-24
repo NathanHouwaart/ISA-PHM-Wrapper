@@ -2,6 +2,19 @@
 
 ## Unreleased
 
+- Documentation and public onboarding:
+  - Added root `README.md` with quickstart, API highlights, and safety defaults.
+  - Added AI integration guide: `docs/AI_AGENT_GUIDE.md`.
+  - Added release gate checklist: `docs/RELEASE_READINESS_CHECKLIST.md`.
+  - Expanded `notebooks/10_basic_load_and_inspect.ipynb` with JSON-only tool examples.
+- AI interface:
+  - Added JSON-in/JSON-out tool registry (`wrapper.list_tools()`, `wrapper.call_tool(...)`).
+  - Added golden snapshot test for `ai_context` payload stability.
+- CSV loading controls:
+  - Added `csv_bad_lines` configuration (`error`/`warn`/`skip`) on `ISAWrapper`/`DataIntegrator`.
+  - Extended `DataLoadMetadata` with CSV diagnostics (`engine`, `sep`, `encoding`, detection source).
+- Plot API usability:
+  - Added optional plot override arguments (`title`, axis labels, width, height) across study/assay/run plot APIs.
 - Tooling hardening:
   - Added `.gitignore` for Python cache and notebook artifacts.
   - Added CI workflow (`.github/workflows/ci.yml`) with a Python 3.10-3.13 test matrix.

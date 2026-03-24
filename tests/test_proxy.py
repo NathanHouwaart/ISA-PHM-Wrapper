@@ -535,6 +535,80 @@ class TestAssayProxyParamListing:
         assert df.at[0, "value"] == 1024
 
 
+class TestPlotOverrideArgs:
+    def test_assay_plot_timeseries_override_args(
+        self, minimal_single_run_isa_file, tmp_path
+    ):
+        nav, _ = _build_navigator(minimal_single_run_isa_file, tmp_path)
+        assay = nav.study("Test Study").assay("a_st01_se01")
+        fig = assay.plot_timeseries(
+            title="Custom Waveform",
+            xlabel="Seconds",
+            ylabel="Accel (g)",
+            width=920,
+            height=360,
+        )
+        assert fig.title.text == "Custom Waveform"
+        assert fig.xaxis[0].axis_label == "Seconds"
+        assert fig.yaxis[0].axis_label == "Accel (g)"
+        assert fig.width == 920
+        assert fig.height == 360
+
+    def test_assay_plot_distribution_override_args(
+        self, minimal_single_run_isa_file, tmp_path
+    ):
+        nav, _ = _build_navigator(minimal_single_run_isa_file, tmp_path)
+        assay = nav.study("Test Study").assay("a_st01_se01")
+        fig = assay.plot_distribution(
+            title="Custom Distribution",
+            xlabel="Signal",
+            ylabel="Probability Density",
+            width=840,
+            height=340,
+        )
+        assert fig.title.text == "Custom Distribution"
+        assert fig.xaxis[0].axis_label == "Signal"
+        assert fig.yaxis[0].axis_label == "Probability Density"
+        assert fig.width == 840
+        assert fig.height == 340
+
+    def test_run_plot_distribution_override_args(
+        self, minimal_single_run_isa_file, tmp_path
+    ):
+        nav, _ = _build_navigator(minimal_single_run_isa_file, tmp_path)
+        run = nav.study("Test Study").assay("a_st01_se01").run("run_01")
+        fig = run.plot_distribution(
+            title="Run Dist",
+            xlabel="Amplitude [u]",
+            ylabel="Density [u^-1]",
+            width=760,
+            height=320,
+        )
+        assert fig.title.text == "Run Dist"
+        assert fig.xaxis[0].axis_label == "Amplitude [u]"
+        assert fig.yaxis[0].axis_label == "Density [u^-1]"
+        assert fig.width == 760
+        assert fig.height == 320
+
+    def test_study_plot_sensor_boxplot_override_args(
+        self, minimal_single_run_isa_file, tmp_path
+    ):
+        nav, _ = _build_navigator(minimal_single_run_isa_file, tmp_path)
+        study = nav.study("Test Study")
+        fig = study.plot_sensor_boxplot(
+            title="Study Sensor Boxplot",
+            xlabel="Channel",
+            ylabel="Signal [u]",
+            width=780,
+            height=310,
+        )
+        assert fig.title.text == "Study Sensor Boxplot"
+        assert fig.xaxis[0].axis_label == "Channel"
+        assert fig.yaxis[0].axis_label == "Signal [u]"
+        assert fig.width == 780
+        assert fig.height == 310
+
+
 class TestAssayProxyUnitInference:
     @staticmethod
     def _mutate_measurement_value(base_file, tmp_path, value) -> object:

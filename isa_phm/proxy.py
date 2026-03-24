@@ -446,6 +446,10 @@ class StudyProxy:
         outlier_strategy: str = "drop",
         column: str = "value",
         title: str | None = None,
+        xlabel: str | None = None,
+        ylabel: str | None = None,
+        width: int | None = None,
+        height: int | None = None,
     ):
         """
         Interactive Bokeh boxplot comparing amplitude across all sensor channels.
@@ -470,6 +474,14 @@ class StudyProxy:
             DataFrame column holding measurement values (default ``"value"``)
         title : str | None
             Override the auto-generated plot title.
+        xlabel : str | None
+            Override x-axis label.
+        ylabel : str | None
+            Override y-axis label.
+        width : int | None
+            Override figure width in pixels.
+        height : int | None
+            Override figure height in pixels.
 
         Returns
         -------
@@ -528,14 +540,15 @@ class StudyProxy:
             mean=means, upper=uppers, lower=lowers,
         ))
 
-        ylabel = f"Amplitude ({unit})" if unit else "Amplitude"
+        resolved_ylabel = ylabel or (f"Amplitude ({unit})" if unit else "Amplitude")
         p = figure(
             x_range=sensors,
             title=title or f"{self._study.title} \u2014 Sensor Amplitude Comparison",
-            height=450,
+            width=width or max(600, len(sensors) * 60),
+            height=height or 450,
             tools="pan,wheel_zoom,box_zoom,reset,save",
-            y_axis_label=ylabel,
-            x_axis_label="Sensor channel",
+            y_axis_label=resolved_ylabel,
+            x_axis_label=xlabel or "Sensor channel",
         )
 
         # Whiskers (extend to 1.5 \u00d7 IQR or data min/max, whichever comes first)
@@ -1059,6 +1072,11 @@ class AssayProxy:
         column: str = "value",
         bins: int = 50,
         file_type: Literal["raw", "processed", "auto"] = "processed",
+        title: str | None = None,
+        xlabel: str | None = None,
+        ylabel: str | None = None,
+        width: int | None = None,
+        height: int | None = None,
     ) -> object:
         """
         Amplitude histogram + KDE for one run.
@@ -1081,7 +1099,11 @@ class AssayProxy:
             df,
             column=column,
             bins=bins,
-            title=f"{self._assay.assay_id} / {label} â€” Distribution of '{column}'",
+            title=title or f"{self._assay.assay_id} / {label} â€” Distribution of '{column}'",
+            xlabel=xlabel,
+            ylabel=ylabel,
+            width=width,
+            height=height,
         )
 
     def plot_lifecycle(
@@ -1089,6 +1111,11 @@ class AssayProxy:
         feature: str = "rms",
         file_type: Literal["raw", "processed", "auto"] = "processed",
         n_workers: int | None = None,
+        title: str | None = None,
+        xlabel: str | None = None,
+        ylabel: str | None = None,
+        width: int | None = None,
+        height: int | None = None,
     ) -> object:
         """
         Lifecycle curve â€” scalar feature over all runs.
@@ -1106,7 +1133,11 @@ class AssayProxy:
         return self._plotter.plot_lifecycle(
             lc,
             feature=feature,
-            title=f"{self._assay.assay_id} â€” Lifecycle {feature.upper()}",
+            title=title or f"{self._assay.assay_id} â€” Lifecycle {feature.upper()}",
+            xlabel=xlabel,
+            ylabel=ylabel,
+            width=width,
+            height=height,
         )
 
     def plot_frequency_domain(
@@ -1117,6 +1148,11 @@ class AssayProxy:
         column: str = "value",
         file_type: Literal["raw", "processed", "auto"] = "processed",
         log_scale: bool = True,
+        title: str | None = None,
+        xlabel: str | None = None,
+        ylabel: str | None = None,
+        width: int | None = None,
+        height: int | None = None,
     ) -> object:
         """
         FFT spectrum for one run.
@@ -1148,7 +1184,11 @@ class AssayProxy:
             fs=fs,
             column=column,
             log_scale=log_scale,
-            title=f"{self._assay.assay_id} / {label} â€” FFT Spectrum",
+            title=title or f"{self._assay.assay_id} / {label} â€” FFT Spectrum",
+            xlabel=xlabel,
+            ylabel=ylabel,
+            width=width,
+            height=height,
         )
 
     def plot_correlation(
@@ -1156,6 +1196,11 @@ class AssayProxy:
         columns: list[str] | None = None,
         file_type: Literal["raw", "processed", "auto"] = "processed",
         n_workers: int | None = None,
+        title: str | None = None,
+        xlabel: str | None = None,
+        ylabel: str | None = None,
+        width: int | None = None,
+        height: int | None = None,
     ) -> object:
         """
         Correlation heatmap of lifecycle scalar features across all runs.
@@ -1178,7 +1223,11 @@ class AssayProxy:
         return self._plotter.plot_correlation(
             lc,
             columns=columns,
-            title=f"{self._assay.assay_id} â€” Feature Correlation",
+            title=title or f"{self._assay.assay_id} â€” Feature Correlation",
+            xlabel=xlabel,
+            ylabel=ylabel,
+            width=width,
+            height=height,
         )
 
     def plot_variability(
@@ -1186,6 +1235,11 @@ class AssayProxy:
         run_ids: list[str] | None = None,
         value_column: str = "value",
         file_type: Literal["raw", "processed", "auto"] = "processed",
+        title: str | None = None,
+        xlabel: str | None = None,
+        ylabel: str | None = None,
+        width: int | None = None,
+        height: int | None = None,
     ) -> object:
         """
         Boxplot of sensor amplitude per run.
@@ -1223,20 +1277,33 @@ class AssayProxy:
             combined,
             value_column=value_column,
             group_by="run_id",
-            title=f"{self._assay.assay_id} â€” Amplitude Variability",
+            title=title or f"{self._assay.assay_id} â€” Amplitude Variability",
+            xlabel=xlabel,
+            ylabel=ylabel,
+            width=width,
+            height=height,
         )
 
     def plot_missing_values(
         self,
         run_id: str | None = None,
         file_type: Literal["raw", "processed", "auto"] = "processed",
+        title: str | None = None,
+        xlabel: str | None = None,
+        ylabel: str | None = None,
+        width: int | None = None,
+        height: int | None = None,
     ) -> object:
         """Heatmap of NaN presence in a single run's time series."""
         df = self.load_dataframe(run_id=run_id, file_type=file_type)
         label = run_id or (self._assay.runs[0].run_id if self._assay.runs else "")
         return self._plotter.plot_missing_values(
             df,
-            title=f"{self._assay.assay_id} / {label} â€” Missing Values",
+            title=title or f"{self._assay.assay_id} / {label} â€” Missing Values",
+            xlabel=xlabel,
+            ylabel=ylabel,
+            width=width,
+            height=height,
         )
 
     def plot_timeseries(
@@ -1250,6 +1317,11 @@ class AssayProxy:
         outlier_lower: "float | None" = None,
         outlier_upper: "float | None" = None,
         max_points: int = 10_000,
+        title: str | None = None,
+        xlabel: str | None = None,
+        ylabel: str | None = None,
+        width: int | None = None,
+        height: int | None = None,
     ) -> object:
         """
         Time-domain waveform for one run.
@@ -1295,9 +1367,11 @@ class AssayProxy:
             df,
             outlier_mask=outlier_mask,
             max_points=max_points,
-            xlabel="time",
-            ylabel=self._ylabel(),
-            title=f"{self._assay.assay_id} / {label} â€” Waveform",
+            xlabel=xlabel or "time",
+            ylabel=ylabel or self._ylabel(),
+            title=title or f"{self._assay.assay_id} / {label} â€” Waveform",
+            width=width,
+            height=height,
         )
 
     def plot_outlier_comparison(
@@ -1305,6 +1379,11 @@ class AssayProxy:
         df_original: pd.DataFrame,
         df_clean: pd.DataFrame,
         strategy: str = "clip",
+        title: str | None = None,
+        xlabel: str | None = None,
+        ylabel: str | None = None,
+        width: int | None = None,
+        height: int | None = None,
     ) -> object:
         """
         Side-by-side before/after waveform after :py:meth:`fix_outliers`.
@@ -1322,8 +1401,11 @@ class AssayProxy:
             df_original,
             df_clean,
             strategy=strategy,
-            ylabel=self._ylabel(),
-            title=f"{self._assay.assay_id} â€” Outlier correction ({strategy})",
+            xlabel=xlabel,
+            ylabel=ylabel or self._ylabel(),
+            title=title or f"{self._assay.assay_id} â€” Outlier correction ({strategy})",
+            width=width,
+            height=height,
         )
 
     # ------------------------------------------------------------------
@@ -1671,17 +1753,40 @@ class RunProxy:
         )
 
     def plot_distribution(
-        self, column: str = "value", bins: int = 50, file_type: Literal["raw", "processed", "auto"] = "processed"
+        self,
+        column: str = "value",
+        bins: int = 50,
+        file_type: Literal["raw", "processed", "auto"] = "processed",
+        title: str | None = None,
+        xlabel: str | None = None,
+        ylabel: str | None = None,
+        width: int | None = None,
+        height: int | None = None,
     ) -> object:
         """Amplitude histogram + KDE."""
         df = self.load_dataframe(file_type=file_type)
         return self._plotter.plot_distribution(
-            df, column=column, bins=bins,
-            title=f"{self._assay.assay_id} / {self._run.run_id} â€” Distribution"
+            df,
+            column=column,
+            bins=bins,
+            title=title or f"{self._assay.assay_id} / {self._run.run_id} â€” Distribution",
+            xlabel=xlabel,
+            ylabel=ylabel,
+            width=width,
+            height=height,
         )
 
     def plot_frequency_domain(
-        self, fs: float | None = None, column: str = "value", file_type: Literal["raw", "processed", "auto"] = "processed"
+        self,
+        fs: float | None = None,
+        column: str = "value",
+        file_type: Literal["raw", "processed", "auto"] = "processed",
+        log_scale: bool = True,
+        title: str | None = None,
+        xlabel: str | None = None,
+        ylabel: str | None = None,
+        width: int | None = None,
+        height: int | None = None,
     ) -> object:
         """FFT magnitude spectrum."""
         if fs is None:
@@ -1695,8 +1800,15 @@ class RunProxy:
                         pass
         df = self.load_dataframe(file_type=file_type)
         return self._plotter.plot_frequency_domain(
-            df, fs=fs, column=column,
-            title=f"{self._assay.assay_id} / {self._run.run_id} â€” FFT Spectrum"
+            df,
+            fs=fs,
+            column=column,
+            log_scale=log_scale,
+            title=title or f"{self._assay.assay_id} / {self._run.run_id} â€” FFT Spectrum",
+            xlabel=xlabel,
+            ylabel=ylabel,
+            width=width,
+            height=height,
         )
 
 

@@ -147,6 +147,23 @@ class TestRule1PathResolution:
         with pytest.raises(PreprocessingError, match="[Tt]raversal|outside"):
             preprocessor.preprocess(raw)
 
+    def test_windows_filename_fallback_logs_warning(self, tmp_path, caplog):
+        candidate = tmp_path / "signal.csv"
+        candidate.write_text("0,1\n", encoding="utf-8")
+        df = {
+            "@id": "#data_file/df1",
+            "comments": [],
+            "name": r"D:\missing\signal.csv",
+            "type": "Processed Data File",
+        }
+        raw = _bare_investigation([_bare_study([_bare_assay([df])])])
+        preprocessor = ISAPreprocessor(data_root=tmp_path)
+        with caplog.at_level("WARNING", logger="isa_phm"):
+            repaired, _ = preprocessor.preprocess(raw)
+        out_name = repaired["studies"][0]["assays"][0]["dataFiles"][0]["name"]
+        assert out_name == str(candidate)
+        assert "filename fallback" in caplog.text
+
 
 # ---------------------------------------------------------------------------
 # Rule 2 — Normalize file extensions to lowercase

@@ -17,6 +17,7 @@ from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import numpy as np
+import pandas as pd
 import pytest
 
 from isa_phm.errors import AmbiguousRunError, DataFileError
@@ -75,6 +76,24 @@ class TestCSVLoading:
         df = integrator._read_csv(p)
         assert list(df.columns) == ["time", "value"]
         assert len(df) == 100
+
+    def test_bad_csv_row_raises_instead_of_silent_drop(self, tmp_path):
+        p = tmp_path / "bad_rows.csv"
+        p.write_text("0,1\n1,2,3\n2,3\n", encoding="utf-8")
+        integrator = _build_integrator(tmp_path)
+        with pytest.raises(DataFileError, match="Failed to read|Cannot decode"):
+            integrator._read_csv(p)
+
+    def test_latin1_config_selection_is_logged(self, tmp_path, caplog):
+        p = tmp_path / "latin1.csv"
+        # First row is a non-numeric header-like row with Latin-1 byte 0xE9.
+        p.write_bytes("t,\xe9\n0,1\n1,2\n".encode("latin-1"))
+        integrator = _build_integrator(tmp_path)
+        with caplog.at_level("INFO", logger="isa_phm"):
+            df = integrator._read_csv(p)
+        assert list(df.columns) == ["time", "value"]
+        assert len(df) == 2
+        assert "encoding=latin-1" in caplog.text
 
 
 # ---------------------------------------------------------------------------
@@ -161,6 +180,17 @@ class TestAmbiguousRun:
 
         with pytest.raises(AmbiguousRunError):
             integrator.load(assay, study_id=study.study_id, run_id=None)
+
+
+class TestNormalizeTimeGuards:
+    def test_empty_dataframe_raises_clear_datafile_error(
+        self, minimal_single_run_isa_file, tmp_path
+    ):
+        raw = ISAParser(strict=False).load(minimal_single_run_isa_file)
+        inv = _make_investigation(raw, tmp_path)
+        run = inv.studies[0].assays[0].runs[0]
+        with pytest.raises(DataFileError, match="Cannot normalize time"):
+            DataIntegrator._normalize_time(pd.DataFrame({"time": []}), run)
 
 
 # ---------------------------------------------------------------------------

@@ -228,6 +228,14 @@ class ISAPreprocessor:
             if candidate.exists():
                 # Harden fallback: validate the resolved target (symlinks included).
                 self._check_traversal(candidate.resolve(strict=False), entity_id)
+                logger.warning(
+                    "DataFile '%s' in assay '%s': Windows path '%s' was resolved "
+                    "via filename fallback to '%s'.",
+                    entity_id,
+                    assay_id,
+                    name,
+                    candidate,
+                )
                 return str(candidate), True
 
             # Cannot resolve, but don't fail — DataFileError at load time.

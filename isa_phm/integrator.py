@@ -375,7 +375,15 @@ class DataIntegrator:
     @staticmethod
     def _normalize_time(df: pd.DataFrame, run: RunRecord) -> None:
         """Scale/shift time column to seconds in-place when sampling freq is known."""
+        if "time" not in df.columns:
+            raise DataFileError("Cannot normalize time: DataFrame is missing 'time' column.")
+        if df.empty:
+            raise DataFileError("Cannot normalize time: DataFrame has no rows.")
+
         t = df["time"]
+        t_valid = t.dropna()
+        if t_valid.empty:
+            raise DataFileError("Cannot normalize time: no valid time values found.")
 
         fs: float | None = None
         for pv in run.measurement_params:
@@ -387,10 +395,10 @@ class DataIntegrator:
                 except (ValueError, TypeError):
                     continue
 
-        t0 = float(t.iloc[0])
+        t0 = float(t_valid.iloc[0])
         if fs and fs > 0:
             dt_raw = float(t.diff().dropna().abs().median())
-            if dt_raw > 0:
+            if np.isfinite(dt_raw) and dt_raw > 0:
                 scale = (1.0 / fs) / dt_raw
                 df["time"] = (t - t0) * scale
                 return
@@ -528,6 +536,7 @@ class DataIntegrator:
             for encoding in ("utf-8", "latin-1"):
                 config = _CSVReadConfig(engine="c", sep=sep, encoding=encoding)
                 if self._probe_csv(path, config):
+                    self._log_csv_config(path, config, source="common-separators")
                     return config
 
         # Fallback 1: sniff delimiter once, then retry C engine.
@@ -536,15 +545,38 @@ class DataIntegrator:
             for encoding in ("utf-8", "latin-1"):
                 config = _CSVReadConfig(engine="c", sep=sniff_sep, encoding=encoding)
                 if self._probe_csv(path, config):
+                    self._log_csv_config(path, config, source="sniffed-delimiter")
                     return config
 
         # Fallback 2: Python engine with auto-detection.
         for encoding in ("utf-8", "latin-1"):
             config = _CSVReadConfig(engine="python", sep=None, encoding=encoding)
             if self._probe_csv(path, config):
+                self._log_csv_config(path, config, source="python-auto")
                 return config
 
         raise DataFileError(f"Cannot decode '{path}'. Tried UTF-8 and Latin-1.")
+
+    @staticmethod
+    def _log_csv_config(path: Path, config: _CSVReadConfig, source: str) -> None:
+        if config.encoding != "utf-8" or config.engine == "python":
+            logger.info(
+                "CSV config selected for '%s': engine=%s sep=%r encoding=%s source=%s",
+                path,
+                config.engine,
+                config.sep,
+                config.encoding,
+                source,
+            )
+        else:
+            logger.debug(
+                "CSV config selected for '%s': engine=%s sep=%r encoding=%s source=%s",
+                path,
+                config.engine,
+                config.sep,
+                config.encoding,
+                source,
+            )
 
     @staticmethod
     def _sniff_delimiter(path: Path) -> str | None:
@@ -582,7 +614,7 @@ class DataIntegrator:
             encoding=config.encoding,
             header=None,
             dtype=str,
-            on_bad_lines="warn",
+            on_bad_lines="error",
             nrows=nrows,
         )
 
@@ -598,7 +630,7 @@ class DataIntegrator:
             encoding=config.encoding,
             header=None,
             dtype=str,
-            on_bad_lines="warn",
+            on_bad_lines="error",
             chunksize=self._chunk_rows,
         )
 

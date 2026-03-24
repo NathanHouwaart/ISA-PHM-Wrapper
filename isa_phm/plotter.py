@@ -104,6 +104,10 @@ class ISAPlotter:
         column: str = "value",
         bins: int = 50,
         title: str | None = None,
+        xlabel: str | None = None,
+        ylabel: str | None = None,
+        width: int | None = None,
+        height: int | None = None,
     ):
         """
         Histogram + KDE of ``column`` in ``df``.
@@ -126,11 +130,11 @@ class ISAPlotter:
         hist, edges = np.histogram(values, bins=bins, density=True)
 
         p = bokeh_figure(
-            width=self._cfg.width,
-            height=self._cfg.height,
+            width=width or self._cfg.width,
+            height=height or self._cfg.height,
             title=title or f"Distribution of '{column}'",
-            x_axis_label=column,
-            y_axis_label="Density",
+            x_axis_label=xlabel or column,
+            y_axis_label=ylabel or "Density",
             tools="pan,wheel_zoom,box_zoom,reset,save",
         )
         p.title.text_font_size = self._cfg.title_fontsize
@@ -147,10 +151,10 @@ class ISAPlotter:
                 x_kde = np.linspace(values.min(), values.max(), 500)
                 y_kde = kde(x_kde)
                 p.line(x_kde, y_kde, color="firebrick", line_width=2, legend_label="KDE")
-            except Exception:
+            except (np.linalg.LinAlgError, ValueError):
                 pass  # KDE can fail on degenerate data; histogram is sufficient.
 
-        p.add_tools(HoverTool(tooltips=[("Density", "@top{0.000000}")]))
+        p.add_tools(HoverTool(tooltips=[((ylabel or "Density"), "@top{0.000000}")]))
         p.legend.location = "top_right"
         return p
 
@@ -163,6 +167,10 @@ class ISAPlotter:
         lifecycle_df: pd.DataFrame,
         feature: str = "rms",
         title: str | None = None,
+        xlabel: str | None = None,
+        ylabel: str | None = None,
+        width: int | None = None,
+        height: int | None = None,
     ):
         """
         Line plot of a scalar feature across runs (lifecycle curve).
@@ -187,12 +195,13 @@ class ISAPlotter:
             y=df_sorted[feature].tolist(),
         ))
 
+        y_label = ylabel or feature.upper()
         p = bokeh_figure(
-            width=self._cfg.width,
-            height=self._cfg.height,
+            width=width or self._cfg.width,
+            height=height or self._cfg.height,
             title=title or f"Lifecycle — {feature.upper()}",
-            x_axis_label="Run number",
-            y_axis_label=feature.upper(),
+            x_axis_label=xlabel or "Run number",
+            y_axis_label=y_label,
             tools="pan,wheel_zoom,box_zoom,reset,save",
         )
         p.title.text_font_size = self._cfg.title_fontsize
@@ -200,7 +209,7 @@ class ISAPlotter:
         p.scatter("x", "y", source=source, color=self._cfg.line_color, size=6)
         p.add_tools(HoverTool(tooltips=[
             ("Run", "@x"),
-            (feature.upper(), "@y{0.000000}"),
+            (y_label, "@y{0.000000}"),
         ]))
         return p
 
@@ -210,6 +219,10 @@ class ISAPlotter:
         feature: str = "rms",
         title: str | None = None,
         palette: "list[str] | None" = None,
+        xlabel: str | None = None,
+        ylabel: str | None = None,
+        width: int | None = None,
+        height: int | None = None,
     ):
         """
         Overlay lifecycle curves for multiple assays or bearings on one figure.
@@ -237,12 +250,13 @@ class ISAPlotter:
         if len(colors) < n:
             colors = (colors * (n // len(colors) + 1))[:n]
 
+        y_label = ylabel or feature.upper()
         p = bokeh_figure(
-            width=self._cfg.width,
-            height=self._cfg.height,
+            width=width or self._cfg.width,
+            height=height or self._cfg.height,
             title=title or f"Prognostic Lifecycle Comparison — {feature.upper()}",
-            x_axis_label="Run number",
-            y_axis_label=feature.upper(),
+            x_axis_label=xlabel or "Run number",
+            y_axis_label=y_label,
             tools="pan,wheel_zoom,box_zoom,reset,save",
         )
         p.title.text_font_size = self._cfg.title_fontsize
@@ -264,7 +278,7 @@ class ISAPlotter:
         p.legend.click_policy = "hide"
         p.add_tools(HoverTool(tooltips=[
             ("Run",    "@x"),
-            (feature.upper(), "@y{0.000000}"),
+            (y_label, "@y{0.000000}"),
             ("Label",  "@label"),
         ]))
         return p
@@ -281,6 +295,10 @@ class ISAPlotter:
         title: str | None = None,
         log_scale: bool = True,
         unit: str | None = None,
+        xlabel: str | None = None,
+        ylabel: str | None = None,
+        width: int | None = None,
+        height: int | None = None,
     ):
         """
         Single-sided FFT amplitude spectrum.
@@ -317,18 +335,23 @@ class ISAPlotter:
 
         if log_scale:
             y = 20.0 * np.log10(np.maximum(magnitude, 1e-12))
-            ylabel = f"Spectral magnitude (dB re 1 {unit})" if unit else "Spectral magnitude (dB)"
+            default_ylabel = (
+                f"Spectral magnitude (dB re 1 {unit})"
+                if unit
+                else "Spectral magnitude (dB)"
+            )
         else:
             y = magnitude
-            ylabel = f"Spectral amplitude ({unit})" if unit else "Spectral amplitude"
+            default_ylabel = f"Spectral amplitude ({unit})" if unit else "Spectral amplitude"
+        y_label = ylabel or default_ylabel
 
         source = ColumnDataSource(dict(x=freqs.tolist(), y=y.tolist()))
         p = bokeh_figure(
-            width=self._cfg.width,
-            height=self._cfg.height,
+            width=width or self._cfg.width,
+            height=height or self._cfg.height,
             title=title or f"FFT Spectrum — '{column}'",
-            x_axis_label="Frequency (Hz)",
-            y_axis_label=ylabel,
+            x_axis_label=xlabel or "Frequency (Hz)",
+            y_axis_label=y_label,
             x_range=(0, fs / 2),
             tools="pan,wheel_zoom,box_zoom,reset,save",
         )
@@ -336,7 +359,7 @@ class ISAPlotter:
         p.line("x", "y", source=source, color=self._cfg.line_color, line_width=0.9)
         p.add_tools(HoverTool(tooltips=[
             ("Freq (Hz)", "@x{0.0}"),
-            (ylabel, "@y{0.000000}"),
+            (y_label, "@y{0.000000}"),
         ]))
         return p
 
@@ -349,6 +372,10 @@ class ISAPlotter:
         df: pd.DataFrame,
         columns: Sequence[str] | None = None,
         title: str | None = None,
+        xlabel: str | None = None,
+        ylabel: str | None = None,
+        width: int | None = None,
+        height: int | None = None,
     ):
         """
         Correlation heatmap of scalar features.
@@ -388,12 +415,16 @@ class ISAPlotter:
         mapper = LinearColorMapper(palette=_bokeh_palettes.RdBu11, low=-1, high=1)
 
         sz = max(300, 60 * len(columns))
+        width_px = width or sz
+        height_px = height or sz
         p = bokeh_figure(
-            width=sz,
-            height=sz,
+            width=width_px,
+            height=height_px,
             title=title or "Feature Correlation Matrix",
             x_range=list(columns),
             y_range=list(reversed(columns)),
+            x_axis_label=xlabel,
+            y_axis_label=ylabel,
             tools="save",
         )
         p.title.text_font_size = self._cfg.title_fontsize
@@ -427,6 +458,10 @@ class ISAPlotter:
         value_column: str = "value",
         group_by: str = "run_id",
         title: str | None = None,
+        xlabel: str | None = None,
+        ylabel: str | None = None,
+        width: int | None = None,
+        height: int | None = None,
     ):
         """
         Box plot of ``value_column`` grouped by ``group_by``.
@@ -461,14 +496,14 @@ class ISAPlotter:
             mean=means, upper=uppers, lower=lowers,
         ))
 
-        w = max(self._cfg.width, len(group_labels) * 60)
+        w = max(width or self._cfg.width, len(group_labels) * 60)
         p = bokeh_figure(
             x_range=group_labels,
             width=w,
-            height=self._cfg.height,
+            height=height or self._cfg.height,
             title=title or f"Variability of '{value_column}' by '{group_by}'",
-            x_axis_label=group_by,
-            y_axis_label=value_column,
+            x_axis_label=xlabel or group_by,
+            y_axis_label=ylabel or value_column,
             tools="pan,wheel_zoom,box_zoom,reset,save",
         )
         p.title.text_font_size = self._cfg.title_fontsize
@@ -500,6 +535,10 @@ class ISAPlotter:
         self,
         df: pd.DataFrame,
         title: str | None = None,
+        xlabel: str | None = None,
+        ylabel: str | None = None,
+        width: int | None = None,
+        height: int | None = None,
     ):
         """
         Heatmap of NaN presence across DataFrame columns.
@@ -534,11 +573,11 @@ class ISAPlotter:
 
         p = bokeh_figure(
             x_range=numeric_cols,
-            width=max(self._cfg.width, len(numeric_cols) * 80),
-            height=max(300, min(600, n_rows * 3)),
+            width=max(width or self._cfg.width, len(numeric_cols) * 80),
+            height=height or max(300, min(600, n_rows * 3)),
             title=title or "Missing Values Heatmap",
-            x_axis_label="Column",
-            y_axis_label=f"Row index (stride={stride})",
+            x_axis_label=xlabel or "Column",
+            y_axis_label=ylabel or f"Row index (stride={stride})",
             tools="pan,wheel_zoom,reset,save",
         )
         p.title.text_font_size = self._cfg.title_fontsize
@@ -565,6 +604,8 @@ class ISAPlotter:
         xlabel: str | None = None,
         ylabel: str | None = None,
         max_points: int = 10_000,
+        width: int | None = None,
+        height: int | None = None,
     ):
         """
         Time-domain waveform plot with optional outlier overlay.
@@ -596,8 +637,8 @@ class ISAPlotter:
 
         source = ColumnDataSource(dict(t=t_plot.tolist(), v=v_plot.tolist()))
         p = bokeh_figure(
-            width=self._cfg.width,
-            height=self._cfg.height,
+            width=width or self._cfg.width,
+            height=height or self._cfg.height,
             title=title or f"Time-domain waveform — '{value_column}'",
             x_axis_label=xlabel or time_column,
             y_axis_label=ylabel or value_column,
@@ -638,6 +679,8 @@ class ISAPlotter:
         xlabel: str | None = None,
         ylabel: str | None = None,
         title: str | None = None,
+        width: int | None = None,
+        height: int | None = None,
     ):
         """
         Linked before/after waveform panels (x-axes are synchronised).
@@ -668,7 +711,8 @@ class ISAPlotter:
         src_clean = ColumnDataSource(dict(t=t_clean[::s_clean].tolist(), v=v_clean[::s_clean].tolist()))
 
         p1 = bokeh_figure(
-            width=self._cfg.width, height=self._cfg.height,
+            width=width or self._cfg.width,
+            height=height or self._cfg.height,
             title="Original",
             x_axis_label=xl, y_axis_label=yl,
             tools="pan,wheel_zoom,box_zoom,reset,save",
@@ -677,7 +721,8 @@ class ISAPlotter:
         p1.add_tools(HoverTool(tooltips=[("Time", "@t{0.000}"), (yl, "@v{0.000000}")]))
 
         p2 = bokeh_figure(
-            width=self._cfg.width, height=self._cfg.height,
+            width=width or self._cfg.width,
+            height=height or self._cfg.height,
             title=f"After {strategy}",
             x_axis_label=xl, y_axis_label=yl,
             x_range=p1.x_range,   # linked x-axis — pan/zoom both panels together
@@ -691,7 +736,7 @@ class ISAPlotter:
         if title:
             header = Div(
                 text=f"<b style='font-size:{self._cfg.title_fontsize}'>{title}</b>",
-                width=self._cfg.width,
+                width=width or self._cfg.width,
             )
             return bk_column(header, layout)
         return layout

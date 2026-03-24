@@ -10,6 +10,7 @@
 - AI interface:
   - Added JSON-in/JSON-out tool registry (`wrapper.list_tools()`, `wrapper.call_tool(...)`).
   - Added golden snapshot test for `ai_context` payload stability.
+  - Added optional FastAPI agent server (`isa-phm-agent-server`) with `/tools`, `/tool`, and OpenAI-backed `/chat`.
 - CSV loading controls:
   - Added `csv_bad_lines` configuration (`error`/`warn`/`skip`) on `ISAWrapper`/`DataIntegrator`.
   - Extended `DataLoadMetadata` with CSV diagnostics (`engine`, `sep`, `encoding`, detection source).

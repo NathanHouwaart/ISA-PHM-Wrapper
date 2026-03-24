@@ -21,6 +21,7 @@ Optional extras:
 pip install -e ".[dev]"        # tests + dev tooling
 pip install -e ".[notebooks]"  # Jupyter
 pip install -e ".[docs]"       # MkDocs
+pip install -e ".[agent]"      # FastAPI + OpenAI agent server
 ```
 
 ## Quick Start
@@ -75,6 +76,19 @@ print(meta.model_dump())
 ## AI/Agent Usage
 
 See [docs/AI_AGENT_GUIDE.md](docs/AI_AGENT_GUIDE.md).
+
+Run local agent server:
+
+```bash
+set ISA_PHM_JSON=G:\path\to\i_investigation.json
+set ISA_PHM_DATA_ROOT=G:\path\to\data
+set OPENAI_API_KEY=sk-...
+isa-phm-agent-server
+```
+
+Then open:
+- `GET http://127.0.0.1:8000/health`
+- `GET http://127.0.0.1:8000/tools`
 
 ## Notebooks
 

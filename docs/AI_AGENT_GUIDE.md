@@ -61,6 +61,44 @@ run_payload = wrapper.call_tool(
 )
 ```
 
+## Local Agent Server (FastAPI)
+
+Install agent dependencies:
+
+```bash
+pip install -e ".[agent]"
+```
+
+Set environment variables:
+
+```bash
+set ISA_PHM_JSON=G:\path\to\i_investigation.json
+set ISA_PHM_DATA_ROOT=G:\path\to\data
+set ISA_PHM_CSV_BAD_LINES=error
+set OPENAI_API_KEY=sk-...
+set OPENAI_MODEL=gpt-5-mini
+```
+
+Start server:
+
+```bash
+isa-phm-agent-server
+```
+
+Endpoints:
+- `GET /health` - wrapper status and loaded investigation.
+- `GET /tools` - discover available JSON tools.
+- `POST /tool` - direct tool invocation.
+- `POST /chat` - OpenAI-backed tool-calling chat loop.
+
+Example direct tool call:
+
+```bash
+curl -X POST http://127.0.0.1:8000/tool ^
+  -H "Content-Type: application/json" ^
+  -d "{\"name\":\"validate_dataset\",\"args\":{\"check_files\":true}}"
+```
+
 ## Safety Notes
 
 - Keep `csv_bad_lines="error"` in production unless you explicitly accept row loss.

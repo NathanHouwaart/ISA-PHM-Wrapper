@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import copy
 import json
+from pathlib import Path
 import numpy as np
 import pandas as pd
 import pytest
@@ -25,6 +26,7 @@ from isa_phm.errors import (
     AmbiguousRunError,
     AssayNotFoundError,
     DataFileError,
+    PlotError,
     StudyNotFoundError,
     RunNotFoundError,
     ValidationError,
@@ -34,7 +36,13 @@ from isa_phm.extractor import MetadataExtractor
 from isa_phm.parser import ISAParser
 from isa_phm.plotter import ISAPlotter
 from isa_phm.preprocessor import ISAPreprocessor
-from isa_phm.proxy import QueryNavigator, StudyProxy, AssayProxy, RunProxy
+from isa_phm.proxy import (
+    AssayGroup,
+    AssayProxy,
+    QueryNavigator,
+    RunProxy,
+    StudyProxy,
+)
 from isa_phm.schemas import (
     AssayOverview,
     InvestigationOverview,
@@ -55,6 +63,51 @@ def _build_navigator(isa_file, data_root, cache_maxsize=10):
     integrator = DataIntegrator(data_root=data_root, cache_maxsize=cache_maxsize)
     plotter = ISAPlotter()
     return QueryNavigator(inv, integrator, plotter), inv
+
+
+def _build_two_study_isa_file(minimal_single_run_isa: dict, tmp_csv, tmp_path):
+    """Create a temporary ISA file with two single-run studies."""
+    isa = copy.deepcopy(minimal_single_run_isa)
+
+    def _set_processed_paths(study: dict, path: str) -> None:
+        for assay in study["assays"]:
+            for data_file in assay["dataFiles"]:
+                if data_file["type"] == "Processed Data File":
+                    data_file["name"] = path
+
+    _set_processed_paths(isa["studies"][0], str(tmp_csv))
+
+    study2 = copy.deepcopy(isa["studies"][0])
+    study2["@id"] = "#study/st2"
+    study2["identifier"] = "st2-uuid"
+    study2["title"] = "Test Study B"
+    study2["assays"][0]["@id"] = "#assay/a2"
+    study2["assays"][0]["filename"] = "a_st02_se01"
+    _set_processed_paths(study2, str(tmp_csv))
+    isa["studies"].append(study2)
+
+    p = tmp_path / "i_two_studies.json"
+    p.write_text(json.dumps(isa), encoding="utf-8")
+    return p
+
+
+def _build_multi_assay_isa_file(base_isa_file, tmp_path, n_assays: int = 3):
+    """Duplicate the first assay to create a multi-assay synthetic ISA file."""
+    isa = json.loads(Path(base_isa_file).read_text(encoding="utf-8"))
+    study = isa["studies"][0]
+    base_assay = copy.deepcopy(study["assays"][0])
+    assays = [base_assay]
+
+    for idx in range(2, n_assays + 1):
+        clone = copy.deepcopy(base_assay)
+        clone["@id"] = f"#assay/a{idx}"
+        clone["filename"] = f"a_st01_se{idx:02d}"
+        assays.append(clone)
+
+    study["assays"] = assays
+    out = tmp_path / f"i_multi_assay_{n_assays}.json"
+    out.write_text(json.dumps(isa), encoding="utf-8")
+    return out
 
 
 # ---------------------------------------------------------------------------
@@ -103,6 +156,19 @@ class TestQueryNavigator:
         proxy = nav.study(uid)
         assert isinstance(proxy, StudyProxy)
 
+    def test_study_by_index_1_based(self, minimal_single_run_isa_file, tmp_path):
+        nav, _ = _build_navigator(minimal_single_run_isa_file, tmp_path)
+        proxy = nav.study(1)
+        assert isinstance(proxy, StudyProxy)
+        assert proxy.title == "Test Study"
+
+    def test_study_index_out_of_range_raises(
+        self, minimal_single_run_isa_file, tmp_path
+    ):
+        nav, _ = _build_navigator(minimal_single_run_isa_file, tmp_path)
+        with pytest.raises(StudyNotFoundError):
+            nav.study(2)
+
     def test_study_not_found_raises(self, minimal_single_run_isa_file, tmp_path):
         nav, _ = _build_navigator(minimal_single_run_isa_file, tmp_path)
         with pytest.raises(StudyNotFoundError):
@@ -126,6 +192,96 @@ class TestQueryNavigator:
 
         with pytest.raises(ValidationError, match="Duplicate normalized study title"):
             _build_navigator(p, tmp_path)
+
+
+class TestCrossStudyContracts:
+    def _navigator_with_two_studies(self, minimal_single_run_isa, tmp_csv, tmp_path):
+        isa_file = _build_two_study_isa_file(minimal_single_run_isa, tmp_csv, tmp_path)
+        nav, _ = _build_navigator(isa_file, tmp_path)
+        return nav
+
+    def test_study_compare_with_includes_self(
+        self, minimal_single_run_isa, tmp_csv, tmp_path
+    ):
+        nav = self._navigator_with_two_studies(minimal_single_run_isa, tmp_csv, tmp_path)
+        study_a = nav.study("Test Study")
+        study_b = nav.study("Test Study B")
+
+        out = study_a.compare_with([study_b], assay_id=1, file_type="raw")
+        assert list(out.keys()) == ["Test Study", "Test Study B"]
+
+    def test_assay_group_compare_with_is_explicit_only(
+        self, minimal_single_run_isa, tmp_csv, tmp_path
+    ):
+        nav = self._navigator_with_two_studies(minimal_single_run_isa, tmp_csv, tmp_path)
+        study_b = nav.study("Test Study B")
+
+        group = AssayGroup([1], name="First channel")
+        out = group.compare_with([study_b], file_type="raw")
+
+        assert out
+        assert all(k.startswith("Test Study B") for k in out)
+        assert not any(k.startswith("Test Study —") for k in out)
+
+    def test_navigator_compare_studies_is_explicit_only(
+        self, minimal_single_run_isa, tmp_csv, tmp_path
+    ):
+        nav = self._navigator_with_two_studies(minimal_single_run_isa, tmp_csv, tmp_path)
+        out = nav.compare_studies(["Test Study B"], assay_id=1, file_type="raw")
+        assert list(out.keys()) == ["Test Study B"]
+
+
+class TestSensorLifecycleCorrelationErrorHandling:
+    def _study(self, minimal_multi_run_isa_file, tmp_csv_dir, tmp_path) -> StudyProxy:
+        isa_file = _build_multi_assay_isa_file(minimal_multi_run_isa_file, tmp_path, n_assays=3)
+        nav, _ = _build_navigator(isa_file, tmp_csv_dir)
+        return nav.study("Test Study")
+
+    def test_partial_failure_logs_warning_and_returns_figure(
+        self, minimal_multi_run_isa_file, tmp_csv_dir, tmp_path, monkeypatch, caplog
+    ):
+        study = self._study(minimal_multi_run_isa_file, tmp_csv_dir, tmp_path)
+        broken = study.assay(2)
+
+        def _boom(*args, **kwargs):
+            raise RuntimeError("simulated failure")
+
+        monkeypatch.setattr(broken, "lifecycle_features", _boom)
+
+        with caplog.at_level("WARNING", logger="isa_phm"):
+            fig = study.plot_sensor_lifecycle_correlation(
+                assay_ids=[1, 2, 3],
+                feature="rms",
+                file_type="processed",
+                n_workers=1,
+            )
+
+        assert fig is not None
+        assert "plot_sensor_lifecycle_correlation" in caplog.text
+        assert "study='Test Study'" in caplog.text
+        assert "assay='a_st01_se02'" in caplog.text
+        assert "simulated failure" in caplog.text
+
+    def test_hard_failure_raises_plot_error_with_reasons(
+        self, minimal_multi_run_isa_file, tmp_csv_dir, tmp_path, monkeypatch
+    ):
+        isa_file = _build_multi_assay_isa_file(minimal_multi_run_isa_file, tmp_path, n_assays=2)
+        nav, _ = _build_navigator(isa_file, tmp_csv_dir)
+        study = nav.study("Test Study")
+        broken = study.assay(2)
+
+        def _boom(*args, **kwargs):
+            raise RuntimeError("simulated failure")
+
+        monkeypatch.setattr(broken, "lifecycle_features", _boom)
+
+        with pytest.raises(PlotError, match="Need at least 2 valid sensors"):
+            study.plot_sensor_lifecycle_correlation(
+                assay_ids=[1, 2],
+                feature="rms",
+                file_type="processed",
+                n_workers=1,
+            )
 
 
 # ---------------------------------------------------------------------------
@@ -199,6 +355,19 @@ class TestStudyProxy:
         study = self._study(minimal_single_run_isa_file, tmp_path)
         assay = study.assay("a_st01_se01")
         assert isinstance(assay, AssayProxy)
+
+    def test_assay_by_index_1_based(self, minimal_single_run_isa_file, tmp_path):
+        study = self._study(minimal_single_run_isa_file, tmp_path)
+        assay = study.assay(1)
+        assert isinstance(assay, AssayProxy)
+        assert assay.assay_id == "a_st01_se01"
+
+    def test_assay_index_out_of_range_raises(
+        self, minimal_single_run_isa_file, tmp_path
+    ):
+        study = self._study(minimal_single_run_isa_file, tmp_path)
+        with pytest.raises(AssayNotFoundError):
+            study.assay(2)
 
     def test_assay_not_found_raises(self, minimal_single_run_isa_file, tmp_path):
         study = self._study(minimal_single_run_isa_file, tmp_path)

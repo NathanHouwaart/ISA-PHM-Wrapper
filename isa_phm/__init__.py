@@ -13,6 +13,7 @@ Quick start::
 
 from .wrapper import ISAWrapper
 from .plotter import ISAPlotter, PlotConfig
+from .proxy import AssayGroup
 from .semantic import SemanticNormalizer
 from .tools import ToolRegistry
 from .schemas import (
@@ -43,6 +44,7 @@ __all__ = [
     "ISAWrapper",
     "ISAPlotter",
     "PlotConfig",
+    "AssayGroup",
     "SemanticNormalizer",
     "ToolRegistry",
     "DataLoadMetadata",

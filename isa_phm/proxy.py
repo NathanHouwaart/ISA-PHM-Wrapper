@@ -1,13 +1,13 @@
-﻿"""
-Fluent proxy layer â€” AD-2 primary API for ISA-PHM datasets.
+"""
+Fluent proxy layer — AD-2 primary API for ISA-PHM datasets.
 
 Hierarchy
 ---------
 ISAWrapper
-    â””â”€â”€ QueryNavigator              (investigation-level)
-            â””â”€â”€ StudyProxy          (study-level)
-                    â””â”€â”€ AssayProxy  (assay/sensor-level)
-                            â””â”€â”€ RunProxy   (single-run level)
+    QueryNavigator              (investigation-level)
+            StudyProxy          (study-level)
+                    AssayProxy  (assay/sensor-level)
+                            RunProxy   (single-run level)
 
 Entry point::
 
@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import logging
 import re
+from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Literal
 
 import pandas as pd
@@ -137,19 +138,29 @@ class QueryNavigator:
         """Return a summary row for each study."""
         return self.investigation_overview().studies
 
-    def study(self, study_id: str) -> "StudyProxy":
+    def study(self, study_id: str | int) -> "StudyProxy":
         """
-        Look up a study by UUID or title (case-insensitive).
+        Look up a study by 1-based integer index, UUID, or title (case-insensitive).
 
         Parameters
         ----------
-        study_id : str
-            Study UUID or human-readable title.
+        study_id : str | int
+            1-based integer index, study UUID, or human-readable title.
 
         Raises
         ------
         StudyNotFoundError
         """
+        # Integer index (1-based).
+        if isinstance(study_id, int):
+            studies = self._inv.studies
+            if not (1 <= study_id <= len(studies)):
+                raise StudyNotFoundError(
+                    f"Study index {study_id} out of range. "
+                    f"Valid range: 1–{len(studies)}."
+                )
+            return StudyProxy(studies[study_id - 1], self._inv, self._integrator, self._plotter, self._semantic)
+
         # Exact UUID match.
         s = self._by_uuid.get(study_id)
         if s:
@@ -165,6 +176,54 @@ class QueryNavigator:
             f"Study '{study_id}' not found in investigation '{self._inv.title}'. "
             f"Available study titles: {available}"
         )
+
+    def compare_studies(
+        self,
+        study_ids: list[str | int],
+        assay_id: str | int | None = None,
+        assay_group: "AssayGroup | None" = None,
+        file_type: Literal["raw", "processed", "auto"] = "raw",
+        n_workers: int | None = None,
+    ) -> dict[str, pd.DataFrame]:
+        """
+        Load lifecycle features for the same sensor across multiple studies.
+
+        Replaces the manual for-loop pattern. Returns a dict ready to pass
+        directly into ``plotter.plot_multi_lifecycle()``.
+        Only studies listed in ``study_ids`` are included.
+
+        Parameters
+        ----------
+        study_ids : list[str | int]
+            Study titles or 1-based indices.
+        assay_id : str | int | None
+            Single sensor — string assay_id or 1-based integer. Mutually
+            exclusive with *assay_group*.
+        assay_group : AssayGroup | None
+            Named sensor group (e.g. ``AssayGroup([1, 2], name="Accel X/Y")``)
+            — one lifecycle DataFrame per member, keyed by
+            ``"StudyTitle — assay_alias"``.
+        file_type : "raw" | "processed" | "auto"
+        n_workers : int | None
+
+        Returns
+        -------
+        dict[str, pd.DataFrame]
+            Keys are study titles (or ``"StudyTitle — alias"`` for groups).
+        """
+        if assay_id is not None and assay_group is not None:
+            raise ValueError("Provide either assay_id or assay_group, not both.")
+        out: dict[str, pd.DataFrame] = {}
+        for sid in study_ids:
+            sp = self.study(sid)
+            if assay_group is not None:
+                grp = sp.assay_group(assay_group)
+                out.update(grp.lifecycle_features(file_type=file_type, n_workers=n_workers))
+            else:
+                aid = assay_id if assay_id is not None else 1
+                lc = sp.assay(aid).lifecycle_features(file_type=file_type, n_workers=n_workers)
+                out[sp.title] = lc
+        return out
 
 
 # ---------------------------------------------------------------------------
@@ -276,11 +335,11 @@ class StudyProxy:
 
     def variable_overview(self) -> list[pd.DataFrame]:
         """
-        Return a list of DataFrames â€” one per unique experimental condition.
+        Return a list of DataFrames — one per unique experimental condition.
 
         Each DataFrame has two columns:
-            variable â€” factor name
-            value    â€” factor value for that condition
+            variable — factor name
+            value    — factor value for that condition
 
         For a single-condition diagnostic study this returns a list with one
         element; for a multi-condition study each element represents a distinct
@@ -316,14 +375,14 @@ class StudyProxy:
 
         Each row is one study factor; the first three columns are:
 
-        ``variable`` â€” factor name |
-        ``type``     â€” factor type annotation (e.g. "Operating condition") |
-        ``unit``     â€” unit string (empty when not specified)
+        ``variable`` — factor name |
+        ``type``     — factor type annotation (e.g. "Operating condition") |
+        ``unit``     — unit string (empty when not specified)
 
         Additional columns hold the factor value for each unique experimental
         condition observed in the dataset.  When only a single condition
-        exists the data column is named ``"Value"``; for multiple conditions
-        they are labelled ``"Condition 1"``, ``"Condition 2"``, and so on.
+        exists the data column is named ``"Value"``; for multiple runs
+        they are labelled ``"Run 1"``, ``"Run 2"``, and so on.
 
         Returns
         -------
@@ -332,15 +391,18 @@ class StudyProxy:
         if not self._study.factors:
             return pd.DataFrame(columns=["variable", "type", "unit"])
 
-        # Collect unique factor-value dicts in order of first appearance.
+        # Collect unique factor-value dicts in order of first appearance, paired
+        # with the run number of the first run that carries that combination.
         seen_keys: list[tuple] = []
         conditions: list[dict] = []
+        run_numbers: list[int] = []
         for assay in self._study.assays:
             for run in assay.runs:
                 key = tuple(sorted(run.factor_values.items()))
                 if key not in seen_keys:
                     seen_keys.append(key)
                     conditions.append(dict(run.factor_values))
+                    run_numbers.append(run.run_number)
 
         rows = []
         for factor in self._study.factors:
@@ -352,8 +414,8 @@ class StudyProxy:
             if len(conditions) == 1:
                 row["Value"] = conditions[0].get(factor.factor_name, "")
             else:
-                for i, cond in enumerate(conditions, 1):
-                    row[f"Condition {i}"] = cond.get(factor.factor_name, "")
+                for rn, cond in zip(run_numbers, conditions):
+                    row[f"Run {rn}"] = cond.get(factor.factor_name, "")
             rows.append(row)
 
         return pd.DataFrame(rows)
@@ -455,7 +517,7 @@ class StudyProxy:
         Interactive Bokeh boxplot comparing amplitude across all sensor channels.
 
         Computes box statistics (Q1, median, Q3, whiskers, mean) for each sensor
-        one at a time â€” only summary stats are kept in memory, not raw arrays.
+        one at a time — only summary stats are kept in memory, not raw arrays.
         Returns a ``bokeh.plotting.figure`` that can be shown with::
 
             from bokeh.plotting import show
@@ -630,10 +692,10 @@ class StudyProxy:
         Export all sensor time series annotated with ISA-PHM metadata labels.
 
         Every row of the returned DataFrame is one sample, tagged with its
-        sensor identity and experimental condition â€” ready for ML pipelines.
+        sensor identity and experimental condition — ready for ML pipelines.
 
         Columns: time, value, assay_id, sensor_alias, measurement_type,
-                 run_id, run_number, <factor_name>â€¦
+                 run_id, run_number, <factor_name>…
 
         Parameters
         ----------
@@ -737,7 +799,7 @@ class StudyProxy:
         For single-run assays ``run_id`` may be omitted.  For multi-run assays
         an explicit ``run_id`` is required when there is more than one run.
 
-        Columns: time, <sensor_alias_1>, <sensor_alias_2>, â€¦
+        Columns: time, <sensor_alias_1>, <sensor_alias_2>, …
 
         The merge uses a nearest-neighbour join on ``time`` so sensors sampled
         at slightly different instants can still be aligned.
@@ -787,19 +849,30 @@ class StudyProxy:
             merged = pd.merge_asof(merged, df, on="time", direction="nearest")
         return merged
 
-    def assay(self, assay_id: str) -> "AssayProxy":
+    def assay(self, assay_id: str | int) -> "AssayProxy":
         """
-        Navigate into a specific assay by filename / assay_id.
+        Navigate into a specific assay by 1-based integer index, filename, or assay_id.
 
         Parameters
         ----------
-        assay_id : str
-            Assay filename (e.g. ``"a_st01_se01"``).
+        assay_id : str | int
+            1-based integer index, assay_id string (e.g. ``"a_st01_se01"``),
+            or a case-insensitive partial match.
 
         Raises
         ------
         AssayNotFoundError
         """
+        # Integer index (1-based).
+        if isinstance(assay_id, int):
+            assays = self._study.assays
+            if not (1 <= assay_id <= len(assays)):
+                raise AssayNotFoundError(
+                    f"Assay index {assay_id} out of range for study "
+                    f"'{self._study.title}'. Valid range: 1–{len(assays)}."
+                )
+            return self._assay_proxy(assays[assay_id - 1])
+
         a = self._assay_by_id.get(assay_id)
         if a is None:
             # Try partial / case-insensitive match.
@@ -817,6 +890,395 @@ class StudyProxy:
             )
         return self._assay_proxy(a)
 
+    def assay_group(self, group: "AssayGroup") -> "_AssayGroupBinding":
+        """
+        Bind an :class:`AssayGroup` descriptor to this study.
+
+        Returns an internal binding that provides ``lifecycle_features()``
+        for a single study.  For multi-study comparisons, call
+        :py:meth:`AssayGroup.compare_with` directly on the descriptor
+        or use :py:meth:`ISAWrapper.compare_studies`.
+
+        Parameters
+        ----------
+        group : AssayGroup
+            A study-agnostic descriptor, e.g.
+            ``AssayGroup([1, 2, 3], name="PE Accelerometer")``.
+        """
+        return _AssayGroupBinding(group, self)
+
+    def lifecycle_features(
+        self,
+        group: "AssayGroup",
+        file_type: Literal["raw", "processed", "auto"] = "raw",
+        n_workers: int | None = None,
+    ) -> dict[str, pd.DataFrame]:
+        """
+        Lifecycle features for every assay in *group* within this study.
+
+        Convenience shortcut for
+        ``study.assay_group(group).lifecycle_features(...)``.
+
+        Parameters
+        ----------
+        group : AssayGroup
+            Sensor group descriptor.
+        file_type : "raw" | "processed" | "auto"
+        n_workers : int | None
+
+        Returns
+        -------
+        dict[str, pd.DataFrame]
+            Keyed by ``\"<StudyTitle> \u2014 <sensor alias>\"``.
+        """
+        return _AssayGroupBinding(group, self).lifecycle_features(
+            file_type=file_type, n_workers=n_workers
+        )
+
+    def compare_with(
+        self,
+        other_studies: list["StudyProxy"],
+        assay_id: str | int | None = None,
+        assay_group: "AssayGroup | None" = None,
+        file_type: Literal["raw", "processed", "auto"] = "raw",
+        n_workers: int | None = None,
+    ) -> dict[str, pd.DataFrame]:
+        """
+        Load lifecycle features for the same sensor across this study and
+        *other_studies*. Self is always included as the first entry.
+
+        Parameters
+        ----------
+        other_studies : list[StudyProxy]
+            Additional study proxies to compare against. The result order is
+            deterministic: ``[self] + other_studies``.
+        assay_id : str | int | None
+            Single sensor.  Mutually exclusive with *assay_group*.
+        assay_group : AssayGroup | None
+            Named sensor group.
+        file_type : "raw" | "processed" | "auto"
+        n_workers : int | None
+
+        Returns
+        -------
+        dict[str, pd.DataFrame]
+        """
+        if assay_id is not None and assay_group is not None:
+            raise ValueError("Provide either assay_id or assay_group, not both.")
+        out: dict[str, pd.DataFrame] = {}
+        for sp in [self] + list(other_studies):
+            if assay_group is not None:
+                grp = sp.assay_group(assay_group)
+                out.update(grp.lifecycle_features(file_type=file_type, n_workers=n_workers))
+            else:
+                aid = assay_id if assay_id is not None else 1
+                lc = sp.assay(aid).lifecycle_features(file_type=file_type, n_workers=n_workers)
+                out[sp.title] = lc
+        return out
+
+    def plot_sensor_lifecycle_correlation(
+        self,
+        assay_ids: "list[str | int] | None" = None,
+        feature: str = "rms",
+        file_type: Literal["raw", "processed", "auto"] = "raw",
+        n_workers: int | None = None,
+        title: str | None = None,
+    ) -> object:
+        """
+        Correlation heatmap of *feature* across all sensor channels over all runs.
+
+        Each column in the underlying matrix is one assay; each row is one run.
+        The heatmap shows how sensors co-vary across the degradation trajectory.
+
+        Parameters
+        ----------
+        assay_ids : list[str | int] | None
+            Subset of assays to include.  None = all assays.
+        feature : str
+            Lifecycle feature column name (e.g. ``"rms"``, ``"kurtosis"``).
+        file_type : "raw" | "processed" | "auto"
+        n_workers : int | None
+
+        Notes
+        -----
+        If one sensor fails to produce lifecycle features, it is skipped and
+        a warning is logged. At least two valid sensors are required to build
+        a correlation heatmap.
+        """
+        assay_list = self.list_assays()
+        if assay_ids is not None:
+            proxies = [self.assay(a) for a in assay_ids]
+            labels  = [p.assay_id for p in proxies]
+        else:
+            proxies = [self._assay_proxy(self._assay_by_id[a.assay_id]) for a in assay_list]
+            labels  = [
+                a.sensor_alias or a.assay_id   # AssaySummary has sensor_alias
+                for a in assay_list
+            ]
+
+        matrix: dict[str, pd.Series] = {}
+        failures: list[str] = []
+        for proxy, label in zip(proxies, labels):
+            try:
+                lc = proxy.lifecycle_features(file_type=file_type, n_workers=n_workers)
+            except Exception as exc:
+                msg = f"{label}: {type(exc).__name__}: {exc}"
+                failures.append(msg)
+                logger.warning(
+                    "plot_sensor_lifecycle_correlation: study='%s', assay='%s', "
+                    "feature='%s' failed (%s: %s)",
+                    self.title,
+                    label,
+                    feature,
+                    type(exc).__name__,
+                    exc,
+                )
+                continue
+
+            if feature not in lc.columns:
+                msg = f"{label}: missing feature '{feature}'"
+                failures.append(msg)
+                logger.warning(
+                    "plot_sensor_lifecycle_correlation: study='%s', assay='%s', "
+                    "feature='%s' missing from lifecycle columns=%s",
+                    self.title,
+                    label,
+                    feature,
+                    list(lc.columns),
+                )
+                continue
+
+            matrix[label] = lc.set_index("run_number")[feature]
+
+        if len(matrix) < 2:
+            if failures:
+                detail = "; ".join(failures[:3])
+                if len(failures) > 3:
+                    detail += f"; +{len(failures) - 3} more"
+            else:
+                detail = f"Only {len(matrix)} valid sensor(s) available."
+            raise PlotError(
+                f"Need at least 2 valid sensors for feature '{feature}' in "
+                f"study '{self.title}'. {detail}"
+            )
+
+        pivot = pd.DataFrame(matrix)
+        pivot.columns = [str(c) for c in pivot.columns]
+        return self._plotter.plot_correlation(
+            pivot,
+            columns=list(pivot.columns),
+            title=title or f"{self.title} — Sensor Correlation ({feature})",
+        )
+
+    def plot_cross_correlation(
+        self,
+        assay_id_1: str | int,
+        assay_id_2: str | int,
+        run_id: str | None = None,
+        max_lag: int = 200,
+        file_type: Literal["raw", "processed", "auto"] = "raw",
+        title: str | None = None,
+        width: int | None = None,
+        height: int | None = None,
+    ) -> object:
+        """
+        Normalised cross-correlation between two sensors over a single run.
+
+        Shows the lag (in samples) at which the two signals are most correlated.
+        Useful for detecting that one sensor (e.g. temperature) leads or lags
+        another (e.g. vibration) by a fixed number of samples.
+
+        Parameters
+        ----------
+        assay_id_1, assay_id_2 : str | int
+            The two assays to correlate.
+        run_id : str | None
+            Which run to use.  None = first run of assay_id_1.
+        max_lag : int
+            Maximum lag in samples to display (±max_lag).
+        file_type : "raw" | "processed" | "auto"
+        """
+        import numpy as np
+        from bokeh.plotting import figure as bokeh_figure
+        from bokeh.models import Span
+
+        a1 = self.assay(assay_id_1)
+        a2 = self.assay(assay_id_2)
+
+        # Select run_id — fall back to first run of assay 1.
+        if run_id is None and a1._assay.runs:
+            run_id = a1._assay.runs[0].run_id
+
+        df1 = a1.load_dataframe(run_id=run_id, file_type=file_type)
+        df2 = a2.load_dataframe(run_id=run_id, file_type=file_type)
+
+        col1 = [c for c in df1.columns if c not in ("packet_ts", "time")][0]
+        col2 = [c for c in df2.columns if c not in ("packet_ts", "time")][0]
+
+        v1 = df1[col1].dropna().to_numpy(dtype=float)
+        v2 = df2[col2].dropna().to_numpy(dtype=float)
+
+        # Trim to equal length.
+        n = min(len(v1), len(v2))
+        v1, v2 = v1[:n], v2[:n]
+
+        # Zero-mean normalise.
+        v1 = (v1 - v1.mean()) / (v1.std() + 1e-12)
+        v2 = (v2 - v2.mean()) / (v2.std() + 1e-12)
+
+        # Full cross-correlation, normalised by n.
+        xcorr = np.correlate(v1, v2, mode="full") / n
+        lags  = np.arange(-len(v1) + 1, len(v1))
+
+        # Clip to ±max_lag.
+        mask   = np.abs(lags) <= max_lag
+        lags   = lags[mask]
+        xcorr  = xcorr[mask]
+
+        peak_lag = int(lags[np.argmax(np.abs(xcorr))])
+
+        alias1 = a1._assay.sensor.alias or str(assay_id_1)
+        alias2 = a2._assay.sensor.alias or str(assay_id_2)
+
+        p = bokeh_figure(
+            width=width or 900,
+            height=height or 350,
+            title=title or f"Cross-correlation: {alias1} vs {alias2}  (peak lag = {peak_lag} samples)",
+            x_axis_label="Lag (samples)",
+            y_axis_label="Normalised correlation",
+            tools="pan,wheel_zoom,box_zoom,reset,save",
+        )
+        p.line(lags.tolist(), xcorr.tolist(), line_width=1.5, color="#4C72B0")
+        p.add_layout(Span(location=0, dimension="height", line_color="grey", line_dash="dashed"))
+        p.add_layout(Span(location=peak_lag, dimension="height", line_color="firebrick", line_dash="dashed", line_width=1.5))
+        p.title.text_font_size = "13pt"
+        return p
+
+
+# ---------------------------------------------------------------------------
+# AssayGroup  (study-agnostic named descriptor)
+# ---------------------------------------------------------------------------
+
+@dataclass(frozen=True, init=False, repr=False)
+class AssayGroup:
+    """
+    An immutable, study-agnostic descriptor for a logical group of assays.
+
+    ``AssayGroup`` holds only a name and a list of assay identifiers — it
+    carries no data and is not bound to any study.  Define it once at the
+    top of a notebook and pass it into any study-level method.
+
+    Parameters
+    ----------
+    assay_ids : list[str | int]
+        Assay IDs (strings) or 1-based integer indices.
+    name : str
+        Human-readable label used in plot legends and dict keys.
+
+    Example
+    -------
+    ::
+
+        from isa_phm import AssayGroup
+
+        PE_ACCEL = AssayGroup([9, 10, 11], name="PE Accelerometer (X/Y/Z)")
+        MEMS     = AssayGroup([21, 22, 23], name="MEMS Accelerometer")
+
+        # Single study — fluent chain:
+        s1.lifecycle_features(group=PE_ACCEL, file_type="raw")
+
+        # Multi-study — call compare_with directly on the descriptor:
+        PE_ACCEL.compare_with([s1, s2, s3], file_type="raw")
+
+        # Or use the wrapper shorthand:
+        wrapper.compare_studies(["Bearing 2_1", "Bearing 2_2"], assay_group=PE_ACCEL)
+    """
+
+    name: str
+    assay_ids: tuple[str | int, ...]
+
+    def __init__(self, assay_ids: list[str | int], name: str) -> None:
+        if not assay_ids:
+            raise ValueError("AssayGroup requires at least one assay_id.")
+        object.__setattr__(self, "assay_ids", tuple(assay_ids))
+        object.__setattr__(self, "name", name)
+
+    def __repr__(self) -> str:
+        return f"AssayGroup(name={self.name!r}, assay_ids={list(self.assay_ids)})"
+
+    def compare_with(
+        self,
+        studies: "list[StudyProxy]",
+        file_type: "Literal['raw', 'processed', 'auto']" = "raw",
+        n_workers: "int | None" = None,
+    ) -> "dict[str, pd.DataFrame]":
+        """
+        Lifecycle features for this group across all provided studies.
+
+        No study binding required — call directly on the :class:`AssayGroup`
+        descriptor.  All studies are explicit: what you pass is exactly
+        what appears in the result.
+
+        Parameters
+        ----------
+        studies : list[StudyProxy]
+            Studies to include.
+        file_type : "raw" | "processed" | "auto"
+        n_workers : int | None
+
+        Returns
+        -------
+        dict[str, pd.DataFrame]
+            Keyed by ``\"<StudyTitle> — <sensor alias>\"``.
+        """
+        out: dict[str, pd.DataFrame] = {}
+        for sp in studies:
+            grp = sp.assay_group(self)
+            out.update(grp.lifecycle_features(file_type=file_type, n_workers=n_workers))
+        return out
+
+
+# ---------------------------------------------------------------------------
+# _AssayGroupBinding  (AssayGroup bound to a specific study — internal)
+# ---------------------------------------------------------------------------
+
+class _AssayGroupBinding:
+    """
+    A live binding of an :class:`AssayGroup` to a specific :class:`StudyProxy`.
+
+    Internal object — acquire via ``study.assay_group(group)`` or
+    ``study.lifecycle_features(group=group)``.  Provides
+    ``lifecycle_features()`` over all member assays for a single study.
+
+    For multi-study comparisons call :py:meth:`AssayGroup.compare_with`
+    directly on the descriptor instead.
+    """
+
+    def __init__(self, group: AssayGroup, study: "StudyProxy") -> None:
+        self._group   = group
+        self._study   = study
+        self._proxies = [study.assay(aid) for aid in group.assay_ids]
+
+    def lifecycle_features(
+        self,
+        file_type: Literal["raw", "processed", "auto"] = "raw",
+        n_workers: int | None = None,
+    ) -> dict[str, pd.DataFrame]:
+        """
+        Compute lifecycle features for every member assay.
+
+        Returns
+        -------
+        dict[str, pd.DataFrame]
+            Keyed by ``\"<StudyTitle> — <sensor alias>\"``.
+        """
+        out: dict[str, pd.DataFrame] = {}
+        for proxy in self._proxies:
+            alias = proxy._assay.sensor.alias or proxy.assay_id
+            key   = f"{self._study.title} — {alias}"
+            out[key] = proxy.lifecycle_features(file_type=file_type, n_workers=n_workers)
+        return out
+
 
 # ---------------------------------------------------------------------------
 # AssayProxy
@@ -827,7 +1289,7 @@ class AssayProxy:
     Assay (sensor channel) level proxy.
 
     Provides data loading, lifecycle feature computation, and all six plots.
-    Acquire via: ``wrapper.study("â€¦").assay("a_st01_se01")``
+    Acquire via: ``wrapper.study("…").assay("a_st01_se01")``
     """
 
     def __init__(
@@ -967,9 +1429,9 @@ class AssayProxy:
 
         Raises
         ------
-        AmbiguousRunError   â€” multi-run assay and run_id is None.
-        RunNotFoundError    â€” explicit run_id not present.
-        DataFileError       â€” file missing or unreadable (neither raw nor processed available).
+        AmbiguousRunError   — multi-run assay and run_id is None.
+        RunNotFoundError    — explicit run_id not present.
+        DataFileError       — file missing or unreadable (neither raw nor processed available).
         """
         return self._integrator.load(
             self._assay,
@@ -1006,7 +1468,7 @@ class AssayProxy:
         pd.DataFrame with columns:
             run_id, run_number, study_id, assay_id,
             rms, max, mean, peak2peak, kurtosis, std, crest_factor, skewness,
-            fv_<factor_name>â€¦
+            fv_<factor_name>…
         """
         return self._integrator.lifecycle_features_df(
             self._assay, study_id=self._study.study_id, file_type=file_type, n_workers=n_workers
@@ -1099,7 +1561,7 @@ class AssayProxy:
             df,
             column=column,
             bins=bins,
-            title=title or f"{self._assay.assay_id} / {label} â€” Distribution of '{column}'",
+            title=title or f"{self._assay.assay_id} / {label} — Distribution of '{column}'",
             xlabel=xlabel,
             ylabel=ylabel,
             width=width,
@@ -1118,7 +1580,7 @@ class AssayProxy:
         height: int | None = None,
     ) -> object:
         """
-        Lifecycle curve â€” scalar feature over all runs.
+        Lifecycle curve — scalar feature over all runs.
 
         Raises
         ------
@@ -1133,7 +1595,7 @@ class AssayProxy:
         return self._plotter.plot_lifecycle(
             lc,
             feature=feature,
-            title=title or f"{self._assay.assay_id} â€” Lifecycle {feature.upper()}",
+            title=title or f"{self._assay.assay_id} — Lifecycle {feature.upper()}",
             xlabel=xlabel,
             ylabel=ylabel,
             width=width,
@@ -1161,7 +1623,7 @@ class AssayProxy:
         ----------
         df : pd.DataFrame | None
             Pre-loaded (and optionally pre-cleaned) DataFrame.  Pass ``df_clean``
-            here to exclude overflow/outlier rows before the FFT â€” otherwise those
+            here to exclude overflow/outlier rows before the FFT — otherwise those
             values will dominate the spectrum.  When omitted the data is loaded
             from the file.
         run_id : str | None
@@ -1171,8 +1633,8 @@ class AssayProxy:
         column : str
         file_type : "processed" | "raw" | "auto"
         log_scale : bool
-            True (default) â€” magnitude in dB; good for spotting fault sidebands.
-            False â€” linear amplitude; easier to read peak values in signal units.
+            True (default) — magnitude in dB; good for spotting fault sidebands.
+            False — linear amplitude; easier to read peak values in signal units.
         """
         if fs is None:
             fs = self._infer_fs()
@@ -1184,7 +1646,63 @@ class AssayProxy:
             fs=fs,
             column=column,
             log_scale=log_scale,
-            title=title or f"{self._assay.assay_id} / {label} â€” FFT Spectrum",
+            title=title or f"{self._assay.assay_id} / {label} — FFT Spectrum",
+            xlabel=xlabel,
+            ylabel=ylabel,
+            width=width,
+            height=height,
+        )
+
+    def plot_psd(
+        self,
+        run_id: str | None = None,
+        fs: float | None = None,
+        column: str = "value",
+        nperseg: int = 1024,
+        window: str = "hann",
+        file_type: Literal["raw", "processed", "auto"] = "processed",
+        title: str | None = None,
+        xlabel: str | None = None,
+        ylabel: str | None = None,
+        width: int | None = None,
+        height: int | None = None,
+    ) -> object:
+        """
+        Welch Power Spectral Density for one run.
+
+        Smoother than a raw FFT for noisy or short signals because it averages
+        overlapping periodograms (Welch's method).
+
+        Parameters
+        ----------
+        run_id : str | None
+        fs : float | None
+            Sampling frequency in Hz.  Auto-inferred from protocol parameters
+            if not provided.
+        column : str
+        nperseg : int
+            Length of each Welch segment (default 1024).
+        window : str
+            Window function name passed to ``scipy.signal.welch`` (default "hann").
+        file_type : "processed" | "raw" | "auto"
+        """
+        if fs is None:
+            fs = self._infer_fs()
+        if fs is None:
+            raise PlotError(
+                "fs (sampling frequency) is required for plot_psd. "
+                "Pass fs= explicitly or ensure the ISA-JSON protocol parameters "
+                "include sampling frequency in Hz."
+            )
+        df = self.load_dataframe(run_id=run_id, file_type=file_type)
+        label = run_id or (self._assay.runs[0].run_id if self._assay.runs else "")
+        return self._plotter.plot_power_spectral_density(
+            df,
+            fs=fs,
+            column=column,
+            nperseg=nperseg,
+            window=window,
+            title=title or f"{self._assay.assay_id} / {label} — Welch PSD",
             xlabel=xlabel,
             ylabel=ylabel,
             width=width,
@@ -1223,7 +1741,7 @@ class AssayProxy:
         return self._plotter.plot_correlation(
             lc,
             columns=columns,
-            title=title or f"{self._assay.assay_id} â€” Feature Correlation",
+            title=title or f"{self._assay.assay_id} — Feature Correlation",
             xlabel=xlabel,
             ylabel=ylabel,
             width=width,
@@ -1277,7 +1795,7 @@ class AssayProxy:
             combined,
             value_column=value_column,
             group_by="run_id",
-            title=title or f"{self._assay.assay_id} â€” Amplitude Variability",
+            title=title or f"{self._assay.assay_id} — Amplitude Variability",
             xlabel=xlabel,
             ylabel=ylabel,
             width=width,
@@ -1299,7 +1817,7 @@ class AssayProxy:
         label = run_id or (self._assay.runs[0].run_id if self._assay.runs else "")
         return self._plotter.plot_missing_values(
             df,
-            title=title or f"{self._assay.assay_id} / {label} â€” Missing Values",
+            title=title or f"{self._assay.assay_id} / {label} — Missing Values",
             xlabel=xlabel,
             ylabel=ylabel,
             width=width,
@@ -1369,7 +1887,7 @@ class AssayProxy:
             max_points=max_points,
             xlabel=xlabel or "time",
             ylabel=ylabel or self._ylabel(),
-            title=title or f"{self._assay.assay_id} / {label} â€” Waveform",
+            title=title or f"{self._assay.assay_id} / {label} — Waveform",
             width=width,
             height=height,
         )
@@ -1403,7 +1921,7 @@ class AssayProxy:
             strategy=strategy,
             xlabel=xlabel,
             ylabel=ylabel or self._ylabel(),
-            title=title or f"{self._assay.assay_id} â€” Outlier correction ({strategy})",
+            title=title or f"{self._assay.assay_id} — Outlier correction ({strategy})",
             width=width,
             height=height,
         )
@@ -1490,9 +2008,9 @@ class AssayProxy:
             Hard upper bound override.  Values above this are treated as outliers.
             Example: ``upper=1e7`` to remove only sensor overflow values.
         strategy : "clip" | "nan" | "drop"
-            ``"clip"`` â€” clamp to detection bounds (default).
-            ``"nan"``  â€” replace with NaN.
-            ``"drop"`` â€” remove outlier rows.
+            ``"clip"`` — clamp to detection bounds (default).
+            ``"nan"``  — replace with NaN.
+            ``"drop"`` — remove outlier rows.
         column : str
             Signal column to correct (default ``"value"``).
 
@@ -1530,11 +2048,11 @@ class AssayProxy:
         df : pd.DataFrame
             DataFrame returned by :py:meth:`load_dataframe`.
         strategy : "interpolate" | "ffill" | "bfill" | "mean" | "zero"
-            ``"interpolate"`` â€” linear interpolation between adjacent samples (default).
-            ``"ffill"``       â€” forward-fill from the last valid sample.
-            ``"bfill"``       â€” backward-fill from the next valid sample.
-            ``"mean"``        â€” replace every NaN with the column mean.
-            ``"zero"``        â€” replace every NaN with 0.
+            ``"interpolate"`` — linear interpolation between adjacent samples (default).
+            ``"ffill"``       — forward-fill from the last valid sample.
+            ``"bfill"``       — backward-fill from the next valid sample.
+            ``"mean"``        — replace every NaN with the column mean.
+            ``"zero"``        — replace every NaN with 0.
 
         Returns
         -------
@@ -1619,24 +2137,35 @@ class AssayProxy:
         Attempt to infer the signal measurement unit from protocol parameters.
 
         Checks ``pv.unit`` (resolved ontology string) first, skipping
-        frequency units (Hz/kHz â€” those describe sampling rate, not the
-        measured quantity) and time/duration units (min, s, ms, hr â€” those
-        describe sampling intervals, not the physical signal).  Falls back to
-        ``pv.value`` when it looks like a short non-numeric unit string (e.g.
-        ``"nm"``).
+        frequency units (Hz/kHz — those describe sampling rate, not the
+        measured quantity) and time/duration units (min, s, ms, hr — those
+        describe sampling intervals, not the physical signal).
+
+        When no ``pv.unit`` is present, checks whether ``pv.parameter_name``
+        contains the word "unit" (case-insensitive) — for example
+        ``"Measured Unit"``, ``"Signal Unit"``, ``"Output Unit"`` — and, if
+        so, treats ``pv.value`` directly as the unit string.  This handles
+        arbitrary user-defined unit parameter names without requiring a fixed
+        canonical name.
+
+        Falls back to ``pv.value`` when it looks like a short alphabetical
+        unit string (e.g. ``"nm"``).
         """
         if not self._assay.runs:
             return None
         for pv in self._assay.runs[0].measurement_params:
             if pv.unit and pv.unit.lower() not in self._SKIP_UNITS and "hz" not in pv.unit.lower():
                 return pv.unit
-            if (
-                not pv.unit
-                and isinstance(pv.value, str)
-                and _UNIT_VALUE_RE.fullmatch(pv.value.strip()) is not None
-                and pv.value.strip().lower() not in self._SKIP_UNITS
-            ):
-                return pv.value.strip()
+            if not pv.unit and isinstance(pv.value, str):
+                v = pv.value.strip()
+                if not v or v.lower() in self._SKIP_UNITS:
+                    continue
+                # Parameter name contains "unit" → trust the value as-is
+                if pv.parameter_name and "unit" in pv.parameter_name.lower():
+                    return v
+                # Generic fallback: short alphabetical string
+                if _UNIT_VALUE_RE.fullmatch(v) is not None:
+                    return v
         return None
 
     def _ylabel(self) -> str:
@@ -1681,7 +2210,7 @@ class RunProxy:
     """
     Single-run level proxy.
 
-    Acquire via: ``wrapper.study("â€¦").assay("â€¦").run("run_01")``
+    Acquire via: ``wrapper.study("…").assay("…").run("run_01")``
     """
 
     def __init__(
@@ -1769,7 +2298,7 @@ class RunProxy:
             df,
             column=column,
             bins=bins,
-            title=title or f"{self._assay.assay_id} / {self._run.run_id} â€” Distribution",
+            title=title or f"{self._assay.assay_id} / {self._run.run_id} — Distribution",
             xlabel=xlabel,
             ylabel=ylabel,
             width=width,
@@ -1804,7 +2333,7 @@ class RunProxy:
             fs=fs,
             column=column,
             log_scale=log_scale,
-            title=title or f"{self._assay.assay_id} / {self._run.run_id} â€” FFT Spectrum",
+            title=title or f"{self._assay.assay_id} / {self._run.run_id} — FFT Spectrum",
             xlabel=xlabel,
             ylabel=ylabel,
             width=width,

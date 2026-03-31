@@ -865,14 +865,14 @@ class ISAWrapper:
     # Fluent proxy navigation
     # ------------------------------------------------------------------
 
-    def study(self, study_id: str) -> StudyProxy:
+    def study(self, study_id: str | int) -> StudyProxy:
         """
-        Navigate into a study by UUID or human-readable title.
+        Navigate into a study by 1-based index, UUID, or title.
 
         Parameters
         ----------
-        study_id : str
-            Study UUID or title (case-insensitive).
+        study_id : str | int
+            1-based study index, study UUID, or title (case-insensitive).
 
         Returns
         -------
@@ -887,6 +887,28 @@ class ISAWrapper:
         >>> wrapper.study("BPFO Fault Severity 1 100%").assay("a_st01_se01").load_dataframe()
         """
         return self._navigator.study(study_id)
+
+    def compare_studies(
+        self,
+        study_ids: "list[str | int]",
+        assay_id: "str | int | None" = None,
+        assay_group: "AssayGroup | None" = None,
+        file_type: "Literal['raw', 'processed', 'auto']" = "raw",
+        n_workers: "int | None" = None,
+    ) -> "dict[str, pd.DataFrame]":
+        """
+        Load lifecycle features for the same sensor across multiple studies.
+
+        Delegates to :py:meth:`QueryNavigator.compare_studies`.
+        Only studies listed in ``study_ids`` are included.
+        """
+        return self._navigator.compare_studies(
+            study_ids,
+            assay_id=assay_id,
+            assay_group=assay_group,
+            file_type=file_type,
+            n_workers=n_workers,
+        )
 
     # ------------------------------------------------------------------
     # Cache management

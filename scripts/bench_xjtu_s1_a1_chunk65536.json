@@ -1,0 +1,62 @@
+{
+  "inputs": {
+    "isa_json": "g:\\XJTU-SY_Bearing_Datasets\\XJTU-SY Bearing Datasets-ISA-PHM-2.json",
+    "data_root": "g:\\XJTU-SY_Bearing_Datasets",
+    "file_type": "auto",
+    "n_workers": 8,
+    "strict_validation": false,
+    "repeats": 1,
+    "large_file_threshold_mb": 0.0,
+    "chunk_rows": 65536,
+    "study_limit": 1,
+    "assay_limit": 1
+  },
+  "baseline_runs": [
+    {
+      "enable_chunked_large_file_mode": false,
+      "large_file_threshold_mb": 0.0,
+      "chunk_rows": 65536,
+      "file_type": "auto",
+      "n_workers": 8,
+      "n_target_assays": 1,
+      "n_processed_assays": 1,
+      "total_rows": 123,
+      "total_rms_sum": 206.57991859,
+      "n_failures": 0,
+      "failures_sample": [],
+      "elapsed_sec": 135.5678,
+      "tracemalloc_peak_mb": 104.93
+    }
+  ],
+  "chunked_runs": [
+    {
+      "enable_chunked_large_file_mode": true,
+      "large_file_threshold_mb": 0.0,
+      "chunk_rows": 65536,
+      "file_type": "auto",
+      "n_workers": 8,
+      "n_target_assays": 1,
+      "n_processed_assays": 1,
+      "total_rows": 123,
+      "total_rms_sum": 206.57991859,
+      "n_failures": 0,
+      "failures_sample": [],
+      "elapsed_sec": 34.1012,
+      "tracemalloc_peak_mb": 33.26
+    }
+  ],
+  "comparison": {
+    "avg_elapsed_sec_baseline": 135.5678,
+    "avg_elapsed_sec_chunked": 34.1012,
+    "speedup_baseline_over_chunked": 3.9755,
+    "avg_peak_mb_baseline": 104.93,
+    "avg_peak_mb_chunked": 33.26,
+    "peak_memory_ratio_chunked_over_baseline": 0.317,
+    "total_rows_match": true,
+    "total_rms_sum_match": true,
+    "baseline_total_rows": 123,
+    "chunked_total_rows": 123,
+    "baseline_total_rms_sum": 206.57991859,
+    "chunked_total_rms_sum": 206.57991859
+  }
+}

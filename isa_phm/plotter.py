@@ -364,6 +364,79 @@ class ISAPlotter:
         return p
 
     # ------------------------------------------------------------------
+    # 3b. plot_power_spectral_density
+    # ------------------------------------------------------------------
+
+    def plot_power_spectral_density(
+        self,
+        df: pd.DataFrame,
+        fs: float,
+        column: str = "value",
+        nperseg: int = 1024,
+        window: str = "hann",
+        title: str | None = None,
+        xlabel: str | None = None,
+        ylabel: str | None = None,
+        width: int | None = None,
+        height: int | None = None,
+    ):
+        """
+        Welch Power Spectral Density plot.
+
+        Parameters
+        ----------
+        df : pd.DataFrame
+        fs : float
+            Sampling frequency in Hz.
+        column : str
+        nperseg : int
+            Length of each Welch segment (default 1024).
+        window : str
+            Window function name passed to ``scipy.signal.welch`` (default "hann").
+
+        Returns
+        -------
+        bokeh.plotting.figure
+        """
+        from scipy.signal import welch as scipy_welch
+
+        if fs is None or fs <= 0:
+            raise PlotError(
+                f"fs (sampling frequency) must be a positive float. Got: {fs!r}. "
+                f"Pass fs= explicitly or ensure the ISA-JSON protocol parameters "
+                f"include sampling frequency in Hz."
+            )
+        self._require_column(df, column, "plot_power_spectral_density")
+        values = df[column].dropna().to_numpy(dtype=float)
+        self._require_nonempty(values, column, "plot_power_spectral_density")
+
+        freqs, psd = scipy_welch(
+            values,
+            fs=fs,
+            window=window,
+            nperseg=min(nperseg, len(values)),
+        )
+        psd_db = 10.0 * np.log10(np.maximum(psd, 1e-30))
+
+        source = ColumnDataSource(dict(x=freqs.tolist(), y=psd_db.tolist()))
+        p = bokeh_figure(
+            width=width or self._cfg.width,
+            height=height or self._cfg.height,
+            title=title or f"Welch PSD — '{column}'",
+            x_axis_label=xlabel or "Frequency (Hz)",
+            y_axis_label=ylabel or "Power Spectral Density (dB/Hz)",
+            x_range=(0, fs / 2),
+            tools="pan,wheel_zoom,box_zoom,reset,save",
+        )
+        p.title.text_font_size = self._cfg.title_fontsize
+        p.line("x", "y", source=source, color=self._cfg.line_color, line_width=0.9)
+        p.add_tools(HoverTool(tooltips=[
+            ("Freq (Hz)", "@x{0.0}"),
+            ("PSD (dB/Hz)", "@y{0.000}"),
+        ]))
+        return p
+
+    # ------------------------------------------------------------------
     # 4. plot_correlation
     # ------------------------------------------------------------------
 

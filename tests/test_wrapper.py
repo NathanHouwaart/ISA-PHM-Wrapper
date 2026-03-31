@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import copy
 import json
 from pathlib import Path
 
@@ -9,6 +10,32 @@ import pytest
 from isa_phm import ISAWrapper
 from isa_phm.errors import ValidationError
 from isa_phm.schemas import DatasetValidationReport, OutlierReport
+
+
+def _build_two_study_isa_file(minimal_single_run_isa: dict, tmp_csv, tmp_path) -> Path:
+    """Create a temporary ISA file with two single-run studies."""
+    isa = copy.deepcopy(minimal_single_run_isa)
+
+    def _set_processed_paths(study: dict, path: str) -> None:
+        for assay in study["assays"]:
+            for data_file in assay["dataFiles"]:
+                if data_file["type"] == "Processed Data File":
+                    data_file["name"] = path
+
+    _set_processed_paths(isa["studies"][0], str(tmp_csv))
+
+    study2 = copy.deepcopy(isa["studies"][0])
+    study2["@id"] = "#study/st2"
+    study2["identifier"] = "st2-uuid"
+    study2["title"] = "Test Study B"
+    study2["assays"][0]["@id"] = "#assay/a2"
+    study2["assays"][0]["filename"] = "a_st02_se01"
+    _set_processed_paths(study2, str(tmp_csv))
+    isa["studies"].append(study2)
+
+    p = tmp_path / "i_two_studies_wrapper.json"
+    p.write_text(json.dumps(isa), encoding="utf-8")
+    return p
 
 
 class TestISAWrapperSummaries:
@@ -96,6 +123,29 @@ class TestISAWrapperSummaries:
             _ = wrapper.investigation_contacts()
         with pytest.raises(AttributeError):
             _ = wrapper.investigation_publications()
+
+    def test_study_lookup_by_1_based_index(
+        self, minimal_single_run_isa_file, tmp_path
+    ):
+        wrapper = ISAWrapper(
+            minimal_single_run_isa_file,
+            data_root=tmp_path,
+            strict_validation=False,
+        )
+        study = wrapper.study(1)
+        assert study.title == "Test Study"
+
+    def test_compare_studies_is_explicit_only(
+        self, minimal_single_run_isa, tmp_csv, tmp_path
+    ):
+        isa_file = _build_two_study_isa_file(minimal_single_run_isa, tmp_csv, tmp_path)
+        wrapper = ISAWrapper(
+            isa_file,
+            data_root=tmp_path,
+            strict_validation=False,
+        )
+        out = wrapper.compare_studies(["Test Study B"], assay_id=1, file_type="raw")
+        assert list(out.keys()) == ["Test Study B"]
 
 
 class TestSemanticStrictMode:

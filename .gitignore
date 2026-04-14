@@ -7,6 +7,7 @@ __pycache__/
 .pytest_cache/
 .mypy_cache/
 .ruff_cache/
+.isa_phm.egg-info/
 
 # Jupyter
 .ipynb_checkpoints/
@@ -15,3 +16,5 @@ __pycache__/
 .venv/
 venv/
 env/
+
+Todo-list

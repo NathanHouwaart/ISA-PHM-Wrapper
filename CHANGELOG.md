@@ -6,7 +6,7 @@
   - Added root `README.md` with quickstart, API highlights, and safety defaults.
   - Added AI integration guide: `docs/AI_AGENT_GUIDE.md`.
   - Added release gate checklist: `docs/RELEASE_READINESS_CHECKLIST.md`.
-  - Expanded `notebooks/10_basic_load_and_inspect.ipynb` with JSON-only tool examples.
+  - Expanded `notebooks/01_api_basics/10_basic_load_and_inspect.ipynb` with JSON-only tool examples.
 - AI interface:
   - Added JSON-in/JSON-out tool registry (`wrapper.list_tools()`, `wrapper.call_tool(...)`).
   - Added golden snapshot test for `ai_context` payload stability.

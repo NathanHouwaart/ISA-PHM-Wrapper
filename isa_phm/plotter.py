@@ -437,6 +437,164 @@ class ISAPlotter:
         return p
 
     # ------------------------------------------------------------------
+    # 3c. plot_spectrogram
+    # ------------------------------------------------------------------
+
+    def plot_spectrogram(
+        self,
+        df: pd.DataFrame,
+        fs: float,
+        column: str = "value",
+        nperseg: int = 256,
+        overlap: float = 0.75,
+        title: str | None = None,
+        width: int | None = None,
+        height: int | None = None,
+    ):
+        """
+        Short-Time Fourier Transform spectrogram (time × frequency heatmap).
+
+        Parameters
+        ----------
+        df : pd.DataFrame
+        fs : float
+            Sampling frequency in Hz.
+        column : str
+            Signal column name.
+        nperseg : int
+            FFT window length in samples.
+        overlap : float
+            Fraction of window overlap (0–1).  Default 0.75.
+        """
+        from scipy.signal import spectrogram as scipy_spectrogram
+        import numpy as np
+        from bokeh.models import LinearColorMapper, ColorBar
+        from bokeh.palettes import Viridis256
+
+        self._require_column(df, column, "plot_spectrogram")
+        values = df[column].dropna().to_numpy(dtype=float)
+        self._require_nonempty(values, column, "plot_spectrogram")
+
+        noverlap = int(nperseg * overlap)
+        freqs, times, Sxx = scipy_spectrogram(
+            values, fs=fs, nperseg=nperseg, noverlap=noverlap
+        )
+        Sxx_db = 10.0 * np.log10(np.maximum(Sxx, 1e-30))
+
+        mapper = LinearColorMapper(
+            palette=Viridis256,
+            low=float(Sxx_db.min()),
+            high=float(Sxx_db.max()),
+        )
+        p = bokeh_figure(
+            width=width or self._cfg.width,
+            height=height or self._cfg.height,
+            title=title or f"Spectrogram — '{column}'",
+            x_axis_label="Time (s)",
+            y_axis_label="Frequency (Hz)",
+            tools="pan,wheel_zoom,box_zoom,reset,save",
+        )
+        p.title.text_font_size = self._cfg.title_fontsize
+        p.image(
+            image=[Sxx_db],
+            x=float(times[0]),
+            y=float(freqs[0]),
+            dw=float(times[-1] - times[0]),
+            dh=float(freqs[-1] - freqs[0]),
+            color_mapper=mapper,
+        )
+        color_bar = ColorBar(color_mapper=mapper, width=8)
+        p.add_layout(color_bar, "right")
+        return p
+
+    # ------------------------------------------------------------------
+    # 3d. plot_waterfall
+    # ------------------------------------------------------------------
+
+    def plot_waterfall(
+        self,
+        dfs: dict[str, pd.DataFrame],
+        fs: float,
+        column: str = "value",
+        nperseg: int = 1024,
+        offset_scale: float = 0.3,
+        title: str | None = None,
+        width: int | None = None,
+        height: int | None = None,
+    ):
+        """
+        Waterfall plot — stacked FFT spectra, one per run, offset vertically.
+
+        Shows how the frequency content evolves across the lifecycle.
+
+        Parameters
+        ----------
+        dfs : dict[str, pd.DataFrame]
+            Mapping of run label → DataFrame.  Pass a sparse selection
+            (e.g. every 10th run) for readability.
+        fs : float
+            Sampling frequency in Hz.
+        column : str
+            Signal column name.
+        nperseg : int
+            FFT window length (passed to Welch for smoothing).
+        offset_scale : float
+            Vertical offset between traces as a fraction of the max PSD range.
+        """
+        import numpy as np
+        from scipy.signal import welch as scipy_welch
+        from bokeh.palettes import Viridis
+        from bokeh.models import HoverTool
+
+        p = bokeh_figure(
+            width=width or self._cfg.width,
+            height=height or self._cfg.height,
+            title=title or "Waterfall — FFT evolution",
+            x_axis_label="Frequency (Hz)",
+            y_axis_label="Power (dB/Hz, offset per run)",
+            tools="pan,wheel_zoom,box_zoom,reset,save",
+        )
+        p.title.text_font_size = self._cfg.title_fontsize
+
+        n = len(dfs)
+        palette = (Viridis[max(n, 3)] if n <= 256 else Viridis[256])[:n]
+
+        psd_ranges = []
+        spectra = []
+        for label, df in dfs.items():
+            if column not in df.columns:
+                continue
+            vals = df[column].dropna().to_numpy(dtype=float)
+            if len(vals) == 0:
+                continue
+            freqs, psd = scipy_welch(vals, fs=fs, nperseg=min(nperseg, len(vals)))
+            psd_db = 10.0 * np.log10(np.maximum(psd, 1e-30))
+            psd_ranges.append(psd_db.max() - psd_db.min())
+            spectra.append((label, freqs, psd_db))
+
+        if not spectra:
+            raise PlotError("plot_waterfall: no valid data found in provided DataFrames.")
+
+        step = (sum(psd_ranges) / len(psd_ranges)) * offset_scale
+
+        for i, (label, freqs, psd_db) in enumerate(spectra):
+            offset = i * step
+            color = palette[i % len(palette)]
+            source = ColumnDataSource(dict(
+                x=freqs.tolist(),
+                y=(psd_db + offset).tolist(),
+                label=[label] * len(freqs),
+            ))
+            p.line("x", "y", source=source, color=color, line_width=1.0,
+                   alpha=0.85, legend_label=label if n <= 12 else None)
+
+        if n <= 12:
+            p.legend.location = "top_right"
+            p.legend.label_text_font_size = "9pt"
+        p.add_tools(HoverTool(tooltips=[("Run", "@label"), ("Freq (Hz)", "@x{0.0}"), ("PSD (dB/Hz)", "@y{0.00}")]))
+        return p
+
+    # ------------------------------------------------------------------
     # 4. plot_correlation
     # ------------------------------------------------------------------
 

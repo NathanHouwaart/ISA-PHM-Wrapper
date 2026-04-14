@@ -1474,6 +1474,75 @@ class AssayProxy:
             self._assay, study_id=self._study.study_id, file_type=file_type, n_workers=n_workers
         )
 
+    def to_ml_dataset(
+        self,
+        label_column: str | None = None,
+        feature_columns: list[str] | None = None,
+        file_type: Literal["raw", "processed", "auto"] = "processed",
+        n_workers: int | None = None,
+    ) -> pd.DataFrame:
+        """
+        Return a clean, ML-ready DataFrame built from lifecycle features.
+
+        Each row is one run.  Feature columns are the scalar lifecycle statistics
+        (rms, kurtosis, etc.).  An optional *label_column* names the regression
+        or classification target — pulled from the factor-value columns
+        (``fv_*``) already present in the lifecycle DataFrame.
+
+        No modelling is done here.  This method only shapes and cleans the data
+        so it can be passed directly to scikit-learn, XGBoost, or any other
+        ML framework::
+
+            X = assay.to_ml_dataset(label_column="fv_Bearing Lifetime")
+            y = X.pop("target")
+            # → X, y ready for sklearn
+
+        Parameters
+        ----------
+        label_column : str | None
+            Factor-value column to use as the target (e.g.
+            ``"fv_Bearing Lifetime"``).  When provided it is renamed to
+            ``"target"`` and moved to the last column.  When None the
+            DataFrame is returned without a target column.
+        feature_columns : list[str] | None
+            Explicit list of feature columns to keep.  Defaults to the
+            eight scalar features: rms, max, mean, peak2peak, kurtosis,
+            std, crest_factor, skewness.
+        file_type : "processed" | "raw" | "auto"
+        n_workers : int | None
+
+        Returns
+        -------
+        pd.DataFrame
+            Columns: run_id, run_number, <features>, [target]
+        """
+        _DEFAULT_FEATURES = [
+            "rms", "max", "mean", "peak2peak",
+            "kurtosis", "std", "crest_factor", "skewness",
+        ]
+        lc = self.lifecycle_features(file_type=file_type, n_workers=n_workers)
+
+        keep = ["run_id", "run_number"]
+        feat_cols = feature_columns or _DEFAULT_FEATURES
+        keep += [c for c in feat_cols if c in lc.columns]
+
+        if label_column is not None:
+            if label_column not in lc.columns:
+                available = [c for c in lc.columns if c.startswith("fv_")]
+                raise ValueError(
+                    f"label_column '{label_column}' not found. "
+                    f"Available factor-value columns: {available}"
+                )
+            keep.append(label_column)
+
+        df = lc[keep].copy()
+        df = df.dropna(subset=[c for c in feat_cols if c in df.columns])
+
+        if label_column is not None:
+            df = df.rename(columns={label_column: "target"})
+
+        return df.reset_index(drop=True)
+
     # ------------------------------------------------------------------
     # Quality checks
     # ------------------------------------------------------------------
@@ -1705,6 +1774,124 @@ class AssayProxy:
             title=title or f"{self._assay.assay_id} / {label} — Welch PSD",
             xlabel=xlabel,
             ylabel=ylabel,
+            width=width,
+            height=height,
+        )
+
+    def plot_spectrogram(
+        self,
+        run_id: str | None = None,
+        fs: float | None = None,
+        column: str = "value",
+        nperseg: int = 256,
+        overlap: float = 0.75,
+        file_type: Literal["raw", "processed", "auto"] = "processed",
+        title: str | None = None,
+        width: int | None = None,
+        height: int | None = None,
+    ) -> object:
+        """
+        Short-Time Fourier Transform spectrogram for one run.
+
+        Renders a time × frequency heatmap showing how the signal's frequency
+        content changes within a single measurement run.
+
+        Parameters
+        ----------
+        run_id : str | None
+        fs : float | None
+            Sampling frequency in Hz.  Auto-inferred if not provided.
+        column : str
+        nperseg : int
+            FFT window length in samples (default 256).
+        overlap : float
+            Fraction of window overlap 0–1 (default 0.75).
+        file_type : "processed" | "raw" | "auto"
+        """
+        if fs is None:
+            fs = self._infer_fs()
+        if fs is None:
+            raise PlotError(
+                "fs (sampling frequency) is required for plot_spectrogram. "
+                "Pass fs= explicitly or ensure the ISA-JSON protocol parameters "
+                "include sampling frequency in Hz."
+            )
+        df = self.load_dataframe(run_id=run_id, file_type=file_type)
+        label = run_id or (self._assay.runs[0].run_id if self._assay.runs else "")
+        return self._plotter.plot_spectrogram(
+            df,
+            fs=fs,
+            column=column,
+            nperseg=nperseg,
+            overlap=overlap,
+            title=title or f"{self._assay.assay_id} / {label} — Spectrogram",
+            width=width,
+            height=height,
+        )
+
+    def plot_waterfall(
+        self,
+        run_ids: list[str] | None = None,
+        fs: float | None = None,
+        column: str = "value",
+        n_runs: int = 10,
+        nperseg: int = 1024,
+        offset_scale: float = 0.3,
+        file_type: Literal["raw", "processed", "auto"] = "processed",
+        title: str | None = None,
+        width: int | None = None,
+        height: int | None = None,
+    ) -> object:
+        """
+        Waterfall plot — stacked FFT spectra across multiple runs.
+
+        Shows how the frequency content evolves over the bearing lifecycle.
+
+        Parameters
+        ----------
+        run_ids : list[str] | None
+            Specific run IDs to include.  If None, evenly samples *n_runs*
+            runs across the full lifecycle.
+        fs : float | None
+            Sampling frequency in Hz.  Auto-inferred if not provided.
+        n_runs : int
+            Number of runs to sample when *run_ids* is None (default 10).
+        nperseg : int
+            FFT window length for Welch smoothing.
+        offset_scale : float
+            Vertical spacing between traces as a fraction of the PSD range.
+        file_type : "processed" | "raw" | "auto"
+        """
+        if fs is None:
+            fs = self._infer_fs()
+        if fs is None:
+            raise PlotError(
+                "fs (sampling frequency) is required for plot_waterfall. "
+                "Pass fs= explicitly or ensure the ISA-JSON protocol parameters "
+                "include sampling frequency in Hz."
+            )
+        all_runs = self._assay.runs
+        if run_ids is not None:
+            selected = [r for r in all_runs if r.run_id in run_ids]
+        else:
+            step = max(1, len(all_runs) // n_runs)
+            selected = all_runs[::step][:n_runs]
+
+        dfs: dict[str, pd.DataFrame] = {}
+        for run in selected:
+            try:
+                df = self.load_dataframe(run_id=run.run_id, file_type=file_type)
+                dfs[f"Run {run.run_number}"] = df
+            except Exception:
+                pass
+
+        return self._plotter.plot_waterfall(
+            dfs,
+            fs=fs,
+            column=column,
+            nperseg=nperseg,
+            offset_scale=offset_scale,
+            title=title or f"{self._assay.assay_id} — Waterfall (FFT evolution)",
             width=width,
             height=height,
         )

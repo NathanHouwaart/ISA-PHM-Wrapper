@@ -92,9 +92,18 @@ Then open:
 
 ## Notebooks
 
-- [10_basic_load_and_inspect.ipynb](notebooks/10_basic_load_and_inspect.ipynb)
-- [11_basic_semantic_normalization.ipynb](notebooks/11_basic_semantic_normalization.ipynb)
-- [12_basic_plot_and_export.ipynb](notebooks/12_basic_plot_and_export.ipynb)
+- [00_getting_started/01_getting_started.ipynb](notebooks/00_getting_started/01_getting_started.ipynb)
+- [01_api_basics/10_basic_load_and_inspect.ipynb](notebooks/01_api_basics/10_basic_load_and_inspect.ipynb)
+- [01_api_basics/11_basic_semantic_normalization.ipynb](notebooks/01_api_basics/11_basic_semantic_normalization.ipynb)
+- [01_api_basics/12_basic_plot_and_export.ipynb](notebooks/01_api_basics/12_basic_plot_and_export.ipynb)
+- [02_features/20_lifecycle_features.ipynb](notebooks/02_features/20_lifecycle_features.ipynb)
+- [02_features/21_compare_studies.ipynb](notebooks/02_features/21_compare_studies.ipynb)
+- [02_features/22_time_domain.ipynb](notebooks/02_features/22_time_domain.ipynb)
+- [02_features/23_spectral_analysis.ipynb](notebooks/02_features/23_spectral_analysis.ipynb)
+- [02_features/24_correlation.ipynb](notebooks/02_features/24_correlation.ipynb)
+- [02_features/25_assay_groups.ipynb](notebooks/02_features/25_assay_groups.ipynb)
+- [03_workflows/02_diagnostic_workflow.ipynb](notebooks/03_workflows/02_diagnostic_workflow.ipynb)
+- [03_workflows/03_prognostic_workflow.ipynb](notebooks/03_workflows/03_prognostic_workflow.ipynb)
 
 ## Development
 

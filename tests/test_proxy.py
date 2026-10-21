@@ -47,6 +47,7 @@ from isa_phm.schemas import (
     AssayOverview,
     InvestigationOverview,
     MissingValuesReport,
+    ParameterValue,
     RunOverview,
     StudyOverview,
 )
@@ -807,6 +808,66 @@ class TestAssayProxyUnitInference:
         nav, _ = _build_navigator(isa_file, tmp_path)
         assay = nav.study("Test Study").assay("a_st01_se01")
         assert assay._infer_unit() == "nm"
+
+
+class TestRunAnalysisCapabilities:
+    def _run(self, minimal_single_run_isa_file, tmp_path) -> RunProxy:
+        nav, _ = _build_navigator(minimal_single_run_isa_file, tmp_path)
+        return nav.study("Test Study").assay("a_st01_se01").run("run_01")
+
+    def test_missing_sampling_rate_does_not_block_time_domain_analysis(
+        self, minimal_single_run_isa_file, tmp_path
+    ):
+        capabilities = self._run(minimal_single_run_isa_file, tmp_path).analysis_capabilities()
+
+        assert capabilities.data_loading.available is True
+        assert capabilities.time_domain_features.available is True
+        assert capabilities.frequency_domain.available is False
+        assert capabilities.sampling_frequency.available is False
+
+    def test_sampling_rate_named_parameter_enables_frequency_domain_analysis(
+        self, minimal_single_run_isa_file, tmp_path
+    ):
+        run = self._run(minimal_single_run_isa_file, tmp_path)
+        run._run.measurement_params = [
+            ParameterValue(parameter_name="Sampling Rate", value="25.6", unit="kHz")
+        ]
+
+        capabilities = run.analysis_capabilities()
+
+        assert capabilities.frequency_domain.available is True
+        assert capabilities.sampling_frequency.value == 25_600.0
+        assert capabilities.sampling_frequency.unit == "Hz"
+
+    def test_hz_parameter_with_another_meaning_does_not_enable_frequency_domain_analysis(
+        self, minimal_single_run_isa_file, tmp_path
+    ):
+        run = self._run(minimal_single_run_isa_file, tmp_path)
+        run._run.measurement_params = [
+            ParameterValue(parameter_name="Filter cutoff frequency", value=1000, unit="Hz")
+        ]
+
+        assert run.analysis_capabilities().frequency_domain.available is False
+
+    def test_assay_disables_aggregate_frequency_analysis_for_conflicting_rates(
+        self, minimal_multi_run_isa_file, tmp_csv_dir
+    ):
+        nav, _ = _build_navigator(minimal_multi_run_isa_file, tmp_csv_dir)
+        assay = nav.study("Test Study").assay("a_st01_se01")
+        assay._assay.runs[0].measurement_params = [
+            ParameterValue(parameter_name="fs", value=25_600, unit="Hz")
+        ]
+        assay._assay.runs[1].measurement_params = [
+            ParameterValue(parameter_name="fs", value=51_200, unit="Hz")
+        ]
+        assay._assay.runs[2].measurement_params = [
+            ParameterValue(parameter_name="fs", value=25_600, unit="Hz")
+        ]
+
+        capabilities = assay.analysis_capabilities()
+
+        assert capabilities.frequency_domain.available is False
+        assert "conflicting" in capabilities.sampling_frequency.reason.lower()
 
 
 class TestStudyProxyExportLabeledDataset:

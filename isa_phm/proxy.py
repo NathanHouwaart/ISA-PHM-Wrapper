@@ -34,6 +34,7 @@ from .errors import (
     StudyNotFoundError,
     ValidationError,
 )
+from .capabilities import assay_analysis_capabilities, run_analysis_capabilities
 from .schemas import (
     AssayModel,
     AssayOverview,
@@ -1591,6 +1592,9 @@ class AssayProxy:
                 f"Available: {available}"
             )
         return RunProxy(record, self._assay, self._study, self._inv, self._integrator, self._plotter)
+    def analysis_capabilities(self):
+        """Report analyses supported consistently across this assay's runs."""
+        return assay_analysis_capabilities(self._assay)
 
     # ------------------------------------------------------------------
     # Plots (all six MVP plots)
@@ -2442,6 +2446,9 @@ class RunProxy:
             measurement_params=[pv.model_dump() for pv in self._run.measurement_params],
             processing_params=[pv.model_dump() for pv in self._run.processing_params],
         )
+    def analysis_capabilities(self):
+        """Report which analyses are supported by this run's available metadata."""
+        return run_analysis_capabilities(self._run)
 
     def factor_values(self) -> dict[str, object]:
         """Return study-level factor values for this run."""

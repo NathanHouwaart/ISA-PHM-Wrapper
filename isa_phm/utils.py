@@ -144,7 +144,16 @@ class ReferenceResolver:
         if obj is None:
             return None
         val = obj.get("annotationValue") or obj.get("termAccession") or None
-        return val if val else None
+        if isinstance(val, str):
+            return val or None
+        # Some ISA exports nest the actual annotation beneath a referenced
+        # ontology annotation.  Resolve that second reference as well.
+        if isinstance(val, dict):
+            nested = self.try_resolve(val)
+            if nested is not None:
+                nested_value = nested.get("annotationValue") or nested.get("termAccession")
+                return nested_value if isinstance(nested_value, str) and nested_value else None
+        return None
 
     def __len__(self) -> int:
         return len(self._index)

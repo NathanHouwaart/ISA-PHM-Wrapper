@@ -133,8 +133,6 @@ class DataIntegrator:
         file_type: Literal["raw", "processed", "auto"] = "processed",
     ) -> tuple[pd.DataFrame, DataLoadMetadata]:
         """Load a run and return DataFrame plus resolved file-load metadata."""
-        del study_id  # Reserved for future metadata enrichment.
-
         requested_file_type = self._validate_file_type(file_type)
         run = self._resolve_run(assay, run_id)
         data_file, resolved_file_type = self._resolve_data_file(
@@ -143,7 +141,7 @@ class DataIntegrator:
             requested_file_type=requested_file_type,
         )
 
-        cache_key = (assay.assay_id, run.run_id, resolved_file_type)
+        cache_key = (study_id, assay.assay_id, run.run_id, resolved_file_type)
         with self._cache_key_lock(cache_key):
             cached = self._cache.get(cache_key)
             if cached is not None:
@@ -207,7 +205,7 @@ class DataIntegrator:
                     run=run,
                     requested_file_type=requested_file_type,
                 )
-                cache_key = (assay.assay_id, run.run_id, resolved_file_type)
+                cache_key = (study_id, assay.assay_id, run.run_id, resolved_file_type)
                 raw_values = self._load_values_for_features(
                     path=Path(data_file.path),
                     cache_key=cache_key,
@@ -246,7 +244,7 @@ class DataIntegrator:
                 run=run,
                 requested_file_type=self._validate_file_type(file_type),
             )
-            cache_key = (assay.assay_id, run.run_id, resolved_file_type)
+            cache_key = (study_id, assay.assay_id, run.run_id, resolved_file_type)
             raw_values = self._load_values_for_features(
                 path=Path(data_file.path),
                 cache_key=cache_key,

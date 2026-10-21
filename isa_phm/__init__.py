@@ -17,6 +17,9 @@ from .proxy import AssayGroup
 from .semantic import SemanticNormalizer
 from .tools import ToolRegistry
 from .schemas import (
+    AnalysisCapabilities,
+    AssayAnalysisCapabilities,
+    Capability,
     DataLoadMetadata,
     DatasetValidationReport,
     PublicationModel,
@@ -24,6 +27,7 @@ from .schemas import (
     SemanticField,
     SemanticManifest,
     ValidationIssue,
+    MetadataResolution,
 )
 from .errors import (
     ISAPHMError,
@@ -47,6 +51,9 @@ __all__ = [
     "AssayGroup",
     "SemanticNormalizer",
     "ToolRegistry",
+    "AnalysisCapabilities",
+    "AssayAnalysisCapabilities",
+    "Capability",
     "DataLoadMetadata",
     "DatasetValidationReport",
     "PublicationModel",
@@ -54,6 +61,7 @@ __all__ = [
     "SemanticDiagnostics",
     "SemanticManifest",
     "ValidationIssue",
+    "MetadataResolution",
     "ISAPHMError",
     "ParseError",
     "ValidationError",

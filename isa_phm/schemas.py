@@ -495,6 +495,49 @@ class DatasetValidationReport(BaseModel):
 # ---------------------------------------------------------------------------
 
 
+class Capability(BaseModel):
+    """Whether one analysis operation can be safely attempted."""
+
+    available: bool
+    reason: str | None = None
+
+
+class MetadataResolution(BaseModel):
+    """A conservative resolution of optional metadata from ISA parameters."""
+
+    available: bool
+    value: float | str | None = None
+    unit: str | None = None
+    parameter_name: str | None = None
+    source: Literal["measurement_parameter"] | None = None
+    reason: str | None = None
+
+
+class AnalysisCapabilities(BaseModel):
+    """Analysis availability and metadata resolution for one ISA-PHM run."""
+
+    run_id: str
+    data_loading: Capability
+    time_domain_features: Capability
+    frequency_domain: Capability
+    physical_unit_interpretation: Capability
+    sampling_frequency: MetadataResolution
+    measured_unit: MetadataResolution
+
+
+class AssayAnalysisCapabilities(BaseModel):
+    """Aggregate analysis availability across all runs in one assay."""
+
+    assay_id: str
+    data_loading: Capability
+    time_domain_features: Capability
+    frequency_domain: Capability
+    physical_unit_interpretation: Capability
+    sampling_frequency: MetadataResolution
+    measured_unit: MetadataResolution
+    runs: list[AnalysisCapabilities] = Field(default_factory=list)
+
+
 class MissingValuesReport(BaseModel):
     n_rows: int
     n_cols: int

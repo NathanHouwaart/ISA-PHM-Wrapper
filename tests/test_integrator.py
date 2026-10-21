@@ -12,6 +12,7 @@ Covers:
 
 from __future__ import annotations
 
+from copy import deepcopy
 import csv
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
@@ -147,6 +148,35 @@ class TestCache:
         df2 = integrator.load(assay, study_id=study.study_id)
         # Same object returned from cache.
         assert df1 is df2
+
+    def test_cache_isolated_between_studies_with_same_assay_and_run_ids(
+        self, minimal_single_run_isa, tmp_path
+    ):
+        """A shared integrator must not return one study's signal for another."""
+        study_a_isa = deepcopy(minimal_single_run_isa)
+        study_b_isa = deepcopy(minimal_single_run_isa)
+
+        for data_file in study_a_isa["studies"][0]["assays"][0]["dataFiles"]:
+            if data_file["type"] == "Processed Data File":
+                data_file["name"] = "study_a.csv"
+        for data_file in study_b_isa["studies"][0]["assays"][0]["dataFiles"]:
+            if data_file["type"] == "Processed Data File":
+                data_file["name"] = "study_b.csv"
+
+        (tmp_path / "study_a.csv").write_text("0,1\n1,2\n", encoding="utf-8")
+        (tmp_path / "study_b.csv").write_text("0,100\n1,200\n", encoding="utf-8")
+
+        assay_a = _make_investigation(study_a_isa, tmp_path).studies[0].assays[0]
+        assay_b = _make_investigation(study_b_isa, tmp_path).studies[0].assays[0]
+        integrator = _build_integrator(tmp_path)
+
+        df_a = integrator.load(assay_a, study_id="study-a")
+        df_b = integrator.load(assay_b, study_id="study-b")
+
+        assert df_a["value"].tolist() == [1, 2]
+        assert df_b["value"].tolist() == [100, 200]
+        assert df_a is not df_b
+        assert len(integrator._cache) == 2
 
     def test_clear_cache(self, minimal_single_run_isa_file, tmp_path):
         raw = ISAParser(strict=False).load(minimal_single_run_isa_file)

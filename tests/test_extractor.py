@@ -18,6 +18,7 @@ import pytest
 from isa_phm.errors import ExtractionError
 from isa_phm.extractor import MetadataExtractor
 from isa_phm.schemas import InvestigationModel
+from isa_phm.utils import ReferenceResolver
 
 
 # ---------------------------------------------------------------------------
@@ -37,6 +38,24 @@ class TestExtractInvestigation:
     def test_returns_investigation_model(self, extractor, minimal_single_run_isa):
         result = extractor.extract(minimal_single_run_isa)
         assert isinstance(result, InvestigationModel)
+
+
+class TestReferenceResolver:
+    def test_resolves_nested_ontology_annotation_unit(self):
+        source = {
+            "unit": {"@id": "#unit"},
+            "definitions": [
+                {
+                    "@id": "#unit",
+                    "annotationValue": {"@id": "#unit-label"},
+                },
+                {"@id": "#unit-label", "annotationValue": "kHz"},
+            ],
+        }
+        resolver = ReferenceResolver()
+        resolver.build(source)
+
+        assert resolver.get_unit_str(source["unit"]) == "kHz"
 
     def test_title_extracted(self, extractor, minimal_single_run_isa):
         result = extractor.extract(minimal_single_run_isa)

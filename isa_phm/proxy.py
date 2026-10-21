@@ -326,6 +326,14 @@ class StudyProxy:
         """Return a summary row per assay."""
         return self.overview().assays
 
+    def list_runs(self) -> list[RunOverview]:
+        """Return a detailed summary row for every run in this study."""
+        return [
+            self._assay_proxy(assay).run(run.run_id).overview()
+            for assay in self._study.assays
+            for run in assay.runs
+        ]
+
     def list_factors(self) -> list[FactorSummary]:
         """Return the factors defined for this study."""
         return self.overview().factors

@@ -310,6 +310,13 @@ class TestStudyProxy:
         assert len(assays) == 1
         assert assays[0].assay_id == "a_st01_se01"
 
+    def test_list_runs(self, minimal_single_run_isa_file, tmp_path):
+        study = self._study(minimal_single_run_isa_file, tmp_path)
+        runs = study.list_runs()
+        assert len(runs) == 1
+        assert runs[0].run_id == "run_01"
+        assert runs[0].assay_id == "a_st01_se01"
+
     def test_list_factors(self, minimal_single_run_isa_file, tmp_path):
         study = self._study(minimal_single_run_isa_file, tmp_path)
         factors = study.list_factors()

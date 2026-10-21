@@ -317,6 +317,16 @@ class TestStudyProxy:
         assert runs[0].run_id == "run_01"
         assert runs[0].assay_id == "a_st01_se01"
 
+    def test_list_protocols(self, minimal_single_run_isa_file, tmp_path):
+        study = self._study(minimal_single_run_isa_file, tmp_path)
+        protocols = study.list_protocols()
+        assert len(protocols) == 2
+        assert all(protocol.id and protocol.name for protocol in protocols)
+        assert {protocol.protocol_type for protocol in protocols} == {
+            "Measurement Protocol",
+            "Processing Protocol",
+        }
+
     def test_list_factors(self, minimal_single_run_isa_file, tmp_path):
         study = self._study(minimal_single_run_isa_file, tmp_path)
         factors = study.list_factors()

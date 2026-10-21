@@ -43,6 +43,7 @@ from .schemas import (
     InvestigationModel,
     InvestigationOverview,
     MissingValuesReport,
+    ProtocolModel,
     RunOverview,
     RunRecord,
     RunSummary,
@@ -333,6 +334,17 @@ class StudyProxy:
             for assay in self._study.assays
             for run in assay.runs
         ]
+
+    def list_protocols(self) -> list[ProtocolModel]:
+        """Return the distinct protocols referenced by this study's assays."""
+        protocols: list[ProtocolModel] = []
+        seen_ids: set[str] = set()
+        for assay in self._study.assays:
+            for protocol in self._assay_proxy(assay).list_protocols():
+                if protocol.id not in seen_ids:
+                    protocols.append(protocol)
+                    seen_ids.add(protocol.id)
+        return protocols
 
     def list_factors(self) -> list[FactorSummary]:
         """Return the factors defined for this study."""
@@ -1359,6 +1371,17 @@ class AssayProxy:
     def list_runs(self) -> list[RunSummary]:
         """Return a summary row per run."""
         return self.overview().runs
+
+    def list_protocols(self) -> list[ProtocolModel]:
+        """Return this assay's measurement and processing protocol definitions."""
+        return [
+            protocol
+            for protocol in (
+                self._assay.measurement_protocol,
+                self._assay.processing_protocol,
+            )
+            if protocol is not None
+        ]
 
     def list_measurement_params(self, run_id: str | None = None) -> pd.DataFrame:
         """

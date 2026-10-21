@@ -39,6 +39,7 @@ from pydantic import ValidationError as PydanticValidationError
 from .errors import ExtractionError
 from .schemas import (
     AssayModel,
+    CharacteristicCategory,
     ContactModel,
     DataFile,
     FactorModel,
@@ -117,6 +118,19 @@ class MetadataExtractor:
         study_id = study.get("identifier", "")
         title = study.get("title", "")
         description = study.get("description", "")
+        design_descriptors = [
+            descriptor.get("annotationValue", "")
+            for descriptor in study.get("studyDesignDescriptors", [])
+            if descriptor.get("annotationValue")
+        ]
+        characteristic_categories = [
+            CharacteristicCategory(
+                category_id=category.get("@id", ""),
+                name=category.get("annotationValue", ""),
+            )
+            for category in study.get("characteristicCategories", [])
+            if category.get("annotationValue")
+        ]
 
         # Factors
         factors = [self._extract_factor(f) for f in study.get("factors", [])]
@@ -140,6 +154,8 @@ class MetadataExtractor:
             title=title,
             description=description,
             factors=factors,
+            design_descriptors=design_descriptors,
+            characteristic_categories=characteristic_categories,
             assays=assays,
         )
 

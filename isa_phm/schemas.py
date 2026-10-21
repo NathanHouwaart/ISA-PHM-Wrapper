@@ -153,6 +153,13 @@ class FactorModel(BaseModel):
     description: str | None = None
 
 
+class CharacteristicCategory(BaseModel):
+    """A named study-level characteristic category."""
+
+    category_id: str
+    name: str
+
+
 class RunRecord(BaseModel):
     """One run: a pair of (measurement process, processing process) outputs."""
 
@@ -232,6 +239,8 @@ class StudyModel(BaseModel):
     title: str
     description: str
     factors: list[FactorModel] = Field(default_factory=list)
+    design_descriptors: list[str] = Field(default_factory=list)
+    characteristic_categories: list[CharacteristicCategory] = Field(default_factory=list)
     assays: list[AssayModel] = Field(default_factory=list)
 
     @property

@@ -327,6 +327,26 @@ class TestStudyProxy:
             "Processing Protocol",
         }
 
+    def test_lists_study_design_and_characteristic_metadata(
+        self, minimal_single_run_isa_file, tmp_path
+    ):
+        isa = json.loads(minimal_single_run_isa_file.read_text(encoding="utf-8"))
+        study_data = isa["studies"][0]
+        study_data["studyDesignDescriptors"] = [
+            {"annotationValue": "Diagnostic study"},
+        ]
+        study_data["characteristicCategories"] = [
+            {"@id": "#characteristic/mounting", "annotationValue": "Sensor mounting"},
+        ]
+        minimal_single_run_isa_file.write_text(json.dumps(isa), encoding="utf-8")
+
+        study = self._study(minimal_single_run_isa_file, tmp_path)
+        assert study.list_design_descriptors() == ["Diagnostic study"]
+        categories = study.list_characteristic_categories()
+        assert [(category.category_id, category.name) for category in categories] == [
+            ("#characteristic/mounting", "Sensor mounting"),
+        ]
+
     def test_list_factors(self, minimal_single_run_isa_file, tmp_path):
         study = self._study(minimal_single_run_isa_file, tmp_path)
         factors = study.list_factors()

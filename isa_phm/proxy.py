@@ -39,6 +39,7 @@ from .schemas import (
     AssayModel,
     AssayOverview,
     AssaySummary,
+    CharacteristicCategory,
     DataLoadMetadata,
     InvestigationModel,
     InvestigationOverview,
@@ -345,6 +346,14 @@ class StudyProxy:
                     protocols.append(protocol)
                     seen_ids.add(protocol.id)
         return protocols
+
+    def list_design_descriptors(self) -> list[str]:
+        """Return the study's declared design descriptors."""
+        return list(self._study.design_descriptors)
+
+    def list_characteristic_categories(self) -> list[CharacteristicCategory]:
+        """Return the characteristic categories defined by this study."""
+        return list(self._study.characteristic_categories)
 
     def list_factors(self) -> list[FactorSummary]:
         """Return the factors defined for this study."""

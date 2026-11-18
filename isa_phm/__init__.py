@@ -15,6 +15,7 @@ from .wrapper import ISAWrapper
 from .plotter import ISAPlotter, PlotConfig
 from .proxy import AssayGroup
 from .semantic import SemanticNormalizer
+from .quantity_unit import QuantityUnitAdvisory, check_quantity_unit
 from .tools import ToolRegistry
 from .schemas import (
     AnalysisCapabilities,
@@ -50,6 +51,8 @@ __all__ = [
     "PlotConfig",
     "AssayGroup",
     "SemanticNormalizer",
+    "QuantityUnitAdvisory",
+    "check_quantity_unit",
     "ToolRegistry",
     "AnalysisCapabilities",
     "AssayAnalysisCapabilities",

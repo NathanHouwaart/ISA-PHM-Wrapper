@@ -30,6 +30,7 @@ from typing import Any
 
 from .errors import PreprocessingError
 from .schemas import RepairAction, RepairLog
+from .utils import is_unavailable_raw_placeholder
 
 logger = logging.getLogger("isa_phm")
 
@@ -115,6 +116,8 @@ class ISAPreprocessor:
     def _fix_data_file(
         self, df_entry: dict, assay_id: str, log: RepairLog
     ) -> None:
+        if is_unavailable_raw_placeholder(df_entry):
+            return
         entity_id = df_entry.get("@id", "?")
         original_name = df_entry.get("name", "")
 

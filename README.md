@@ -9,11 +9,37 @@ It provides:
 - Validation and semantic normalization utilities
 - JSON-only tool interface for AI/agent integrations
 
+Measured signal units are read only from the explicit `Measured Unit`
+measurement parameter. If it is absent, unknown, not applicable, or
+conflicting, the Wrapper reports the unit as unavailable rather than
+guessing from other parameters. Older datasets may need their metadata updated.
+
 ## Install
 
 ```bash
+git submodule update --init --recursive
 pip install -e .
 ```
+
+The pinned ISA-PHM Specification submodule supplies the experimental
+quantity–unit warning rules. Initialize submodules before installing from a
+source checkout or building a distribution. Built wheels include the pinned
+rules and remain usable without a separate checkout or network access.
+
+```python
+from isa_phm import check_quantity_unit
+
+advisory = check_quantity_unit(
+    "http://qudt.org/vocab/quantitykind/Acceleration",
+    "http://qudt.org/vocab/unit/GM",
+)
+print(advisory.status, advisory.warnings)  # warning: mass unit for acceleration
+```
+
+For loaded datasets, `wrapper.study(1).assay(1).run("run_001").quantity_unit_advisory()`
+checks the explicit quantity and unit identifiers. `no_known_mismatch` is not
+proof of compatibility. Missing identifiers or unavailable rules return
+`not_checked`; custom and unlisted pairs are not rejected.
 
 Optional extras:
 
@@ -42,6 +68,12 @@ study = wrapper.study("Case 01")
 assay = study.assay("a_st01_se01")
 df, meta = assay.load_dataframe_with_meta(file_type="auto")
 print(meta.model_dump())
+
+# One measurement: features include the selected file and excluded-sample count.
+run = assay.run(assay.list_runs()[0].run_id)
+features = run.features()  # auto: processed if recorded, otherwise raw
+print(features["rms"], features["source"])
+# In a Jupyter notebook: show(run.plot_timeseries())
 ```
 
 ## Public API Highlights
@@ -73,6 +105,36 @@ print(meta.model_dump())
 
 `load_dataframe_with_meta()` returns `DataLoadMetadata` including resolved file source and CSV read diagnostics (engine, separator, encoding, detection source).
 
+Frequency plots resolve the sampling rate from the selected measurement's
+explicit metadata. Missing, conflicting or unrecognized rates require an
+explicit `fs=` in Hz. A waterfall using multiple measurements requires a shared
+rate unless `fs=` is explicitly provided. For processed data, verify that the
+measurement-protocol sampling rate still applies: the wrapper cannot establish
+whether processing resampled the signal. Pass the correct `fs=` when known.
+
+For a focused table, choose the features explicitly:
+
+```python
+table, excluded = assay.feature_table(
+    features=["rms", "peak2peak"], file_type="raw", on_incomplete="drop"
+)
+```
+
+The table records file provenance and is a starting point, not a trained model
+or a guarantee of suitability for modelling. The default `on_incomplete="raise"`
+returns just the table; `"drop"` returns the table and an exclusion report.
+
+`assay.lifecycle_features()` includes one row per measurement, with `status`,
+`error`, `requested_file_type`, `resolved_file_type`, `file_path`, and
+`excluded_samples` columns. Unreadable or entirely non-finite signals have an
+error row rather than disappearing. As with `run.features()`, non-finite
+samples are excluded from the calculation and counted. Check `status` before
+using a lifecycle trend or exporting features for modelling. `feature_table()`
+raises if features or a requested target are missing. To explicitly exclude
+incomplete measurements, pass `on_incomplete="drop"`; the returned report lists
+each excluded measurement and its reasons. The former `to_ml_dataset()` method
+has been removed; migrate to `feature_table(features=[...])`.
+
 ## AI/Agent Usage
 
 See [docs/AI_AGENT_GUIDE.md](docs/AI_AGENT_GUIDE.md).
@@ -92,6 +154,7 @@ Then open:
 
 ## Notebooks
 
+- [XJTU-SY small subset: explore your local export](notebooks/00_getting_started/02_xjtu_small_subset.ipynb) (requires the dataset separately)
 - [00_getting_started/01_getting_started.ipynb](notebooks/00_getting_started/01_getting_started.ipynb)
 - [01_api_basics/10_basic_load_and_inspect.ipynb](notebooks/01_api_basics/10_basic_load_and_inspect.ipynb)
 - [01_api_basics/11_basic_semantic_normalization.ipynb](notebooks/01_api_basics/11_basic_semantic_normalization.ipynb)

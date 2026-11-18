@@ -26,6 +26,7 @@ from isa_phm.extractor import MetadataExtractor
 from isa_phm.integrator import DataIntegrator
 from isa_phm.parser import ISAParser
 from isa_phm.preprocessor import ISAPreprocessor
+from isa_phm.schemas import ParameterValue, RunRecord
 from isa_phm.utils import FEATURE_NAMES
 
 
@@ -224,15 +225,55 @@ class TestAmbiguousRun:
             integrator.load(assay, study_id=study.study_id, run_id=None)
 
 
-class TestNormalizeTimeGuards:
+class TestTimestampHandling:
+    def test_load_preserves_csv_time_on_cache_miss_and_hit(self, minimal_single_run_isa, tmp_path, caplog):
+        for data_file in minimal_single_run_isa["studies"][0]["assays"][0]["dataFiles"]:
+            if data_file["type"] == "Processed Data File":
+                data_file["name"] = "timestamp_test.csv"
+        (tmp_path / "timestamp_test.csv").write_text(
+            "time,value\n2.0,1\n2.0005,2\n2.001,3\n", encoding="utf-8"
+        )
+        assay = _make_investigation(minimal_single_run_isa, tmp_path).studies[0].assays[0]
+        assay.runs[0].measurement_params = [
+            ParameterValue(parameter_name="Sampling Rate", value=2000, unit="kHz")
+        ]
+        integrator = _build_integrator(tmp_path)
+        for _ in range(2):
+            assert integrator.load(assay, study_id="test").time.tolist() == [2.0, 2.0005, 2.001]
+        assert "if timestamps are in seconds" in caplog.text
+
     def test_empty_dataframe_raises_clear_datafile_error(
         self, minimal_single_run_isa_file, tmp_path
     ):
         raw = ISAParser(strict=False).load(minimal_single_run_isa_file)
         inv = _make_investigation(raw, tmp_path)
         run = inv.studies[0].assays[0].runs[0]
-        with pytest.raises(DataFileError, match="Cannot normalize time"):
-            DataIntegrator._normalize_time(pd.DataFrame({"time": []}), run)
+        with pytest.raises(DataFileError, match="Cannot check time"):
+            DataIntegrator._check_time(pd.DataFrame({"time": []}), run)
+
+    @pytest.mark.parametrize("value,unit", [(2000, "Hz"), (2, "kHz"), (0.002, "MHz")])
+    def test_matching_rate_preserves_timestamps(self, value, unit, caplog):
+        run = RunRecord(run_id="test", run_number=1, measurement_params=[
+            ParameterValue(parameter_name="Sampling Rate", value=value, unit=unit)
+        ])
+        df = pd.DataFrame({"time": [2.0, 2.0005, 2.001], "value": [1, 2, 3]})
+        DataIntegrator._check_time(df, run)
+        assert df.time.tolist() == [2.0, 2.0005, 2.001]
+        assert "median timestamp spacing" not in caplog.text
+
+    def test_mismatch_warns_without_changing_timestamps(self, caplog):
+        run = RunRecord(run_id="test", run_number=1, measurement_params=[
+            ParameterValue(parameter_name="Sampling Rate", value=2000, unit="kHz")
+        ])
+        df = pd.DataFrame({"time": [2.0, 2.0005, 2.001]})
+        DataIntegrator._check_time(df, run)
+        assert df.time.tolist() == [2.0, 2.0005, 2.001]
+        assert "if timestamps are in seconds" in caplog.text
+
+    def test_missing_metadata_preserves_timestamps(self):
+        df = pd.DataFrame({"time": [2.0, 2.5]})
+        DataIntegrator._check_time(df, RunRecord(run_id="test", run_number=1))
+        assert df.time.tolist() == [2.0, 2.5]
 
 
 # ---------------------------------------------------------------------------
@@ -240,6 +281,39 @@ class TestNormalizeTimeGuards:
 # ---------------------------------------------------------------------------
 
 class TestLifecycleStreaming:
+    @pytest.mark.parametrize("workers", [1, 2])
+    def test_failed_and_nonfinite_measurements_remain_visible(self, minimal_multi_run_isa_file, tmp_csv_dir, monkeypatch, workers):
+        raw = ISAParser(strict=False).load(minimal_multi_run_isa_file)
+        study = _make_investigation(raw, tmp_csv_dir).studies[0]
+        assay = study.assays[0]
+        integrator = _build_integrator(tmp_csv_dir)
+        first, second, third = assay.runs
+        original = integrator._load_values_for_features
+
+        def values(path, cache_key):
+            if cache_key[2] == first.run_id:
+                return pd.Series([3.0, float('nan'), float('inf'), 4.0])
+            if cache_key[2] == second.run_id:
+                raise DataFileError('test missing file')
+            if cache_key[2] == third.run_id:
+                return pd.Series([float('nan'), float('inf')])
+            return original(path, cache_key)
+
+        monkeypatch.setattr(integrator, '_load_values_for_features', values)
+        df = integrator.lifecycle_features_df(assay, study_id=study.study_id, n_workers=workers).set_index('run_id')
+        assert len(df) == 3
+        assert df.loc[first.run_id, 'status'] == 'ok'
+        assert df.loc[first.run_id, 'excluded_samples'] == 2
+        assert df.loc[first.run_id, 'rms'] == pytest.approx(np.sqrt(12.5))
+        assert df.loc[first.run_id, 'resolved_file_type'] == 'processed'
+        assert df.loc[first.run_id, 'file_path']
+        assert df.loc[second.run_id, 'status'] == 'error'
+        assert 'test missing file' in df.loc[second.run_id, 'error']
+        assert pd.isna(df.loc[second.run_id, 'rms'])
+        assert df.loc[third.run_id, 'status'] == 'error'
+        assert df.loc[third.run_id, 'excluded_samples'] == 2
+        assert 'no finite' in df.loc[third.run_id, 'error']
+
     def test_yields_dicts_with_feature_keys(
         self, minimal_multi_run_isa_file, tmp_csv_dir
     ):

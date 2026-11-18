@@ -73,7 +73,7 @@ class TestNotebookCoverage:
         assert "wrapper.clear_cache(" in source_by_file[
             "notebooks/01_api_basics/10_basic_load_and_inspect.ipynb"
         ]
-        assert "to_ml_dataset(" in source_by_file[
+        assert "feature_table(" in source_by_file[
             "notebooks/02_features/20_lifecycle_features.ipynb"
         ]
         assert "assay.run(" in source_by_file[

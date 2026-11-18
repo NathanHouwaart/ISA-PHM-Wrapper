@@ -12,6 +12,7 @@ Quick start::
 """
 
 from .wrapper import ISAWrapper
+from .attachments import Attachment
 from .plotter import ISAPlotter, PlotConfig
 from .proxy import AssayGroup
 from .semantic import SemanticNormalizer
@@ -47,6 +48,7 @@ from .errors import (
 
 __all__ = [
     "ISAWrapper",
+    "Attachment",
     "ISAPlotter",
     "PlotConfig",
     "AssayGroup",

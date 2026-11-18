@@ -78,6 +78,26 @@ print(features["rms"], features["source"])
 
 ## Public API Highlights
 
+Dataset images and datasheets referenced by the current Backend export can be
+listed without opening files:
+
+```python
+attachments = wrapper.attachments(study=1)  # optionally kind="image" or "datasheet"
+for item in attachments:
+    print(item.kind, item.owner_type, item.owner, item.status, item.path)
+
+# In a Jupyter notebook, preview a known available item:
+next(item for item in attachments if item.kind == "image" and item.status == "available").display()
+```
+
+Paths are checked against `data_root` (the dataset root); missing or unsafe
+references are reported rather than opened. JPEG, PNG and GIF images and PDF
+datasheets can be previewed in Jupyter with the optional notebook dependencies;
+PDF embedding depends on the browser. `item.path` can be used to open an available
+file locally instead. Notebook previews embed attachment content in saved output,
+so clear outputs before sharing a notebook if the files are sensitive. This
+discovers the Backend's current known attachment comments, not arbitrary ISA files.
+
 - Core navigation:
   - `wrapper.study(...) -> StudyProxy`
   - `study.assay(...) -> AssayProxy`

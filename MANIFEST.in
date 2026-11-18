@@ -1,1 +1,4 @@
 include vendor/isa-phm-specification/specification/quantity-unit-warning-rules.json
+include vendor/isa-phm-specification/catalogues/qudt-units-3.5.2.json
+include vendor/isa-phm-specification/catalogues/qudt-quantities-3.5.2.json
+include vendor/isa-phm-specification/catalogues/isa-phm-quantities.json

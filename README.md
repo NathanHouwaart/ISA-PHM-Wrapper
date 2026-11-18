@@ -21,10 +21,20 @@ git submodule update --init --recursive
 pip install -e .
 ```
 
-The pinned ISA-PHM Specification submodule supplies the experimental
-quantity–unit warning rules. Initialize submodules before installing from a
-source checkout or building a distribution. Built wheels include the pinned
-rules and remain usable without a separate checkout or network access.
+The pinned ISA-PHM Specification submodule supplies the draft QUDT 3.5.2
+unit and quantity catalogues and experimental quantity–unit warning rules.
+Initialize submodules before installing from a source checkout or building a
+distribution. Built wheels include these pinned inputs and work offline.
+
+```python
+from isa_phm import lookup_unit, lookup_quantity
+
+print(lookup_unit("http://qudt.org/vocab/unit/G"))
+print(lookup_quantity("http://qudt.org/vocab/quantitykind/Acceleration"))
+```
+
+Lookups require exact identifiers; unknown entries return `None`. They do not
+infer a unit from a symbol, convert values, or validate scientific suitability.
 
 ```python
 from isa_phm import check_quantity_unit

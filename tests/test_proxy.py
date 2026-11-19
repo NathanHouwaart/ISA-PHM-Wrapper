@@ -594,10 +594,158 @@ class TestRunProxy:
         assert meta.resolved_file_type == "processed"
         assert meta.run_id == "run_01"
 
+    def test_features_use_auto_and_report_source(self, minimal_single_run_isa_file, tmp_path):
+        run = self._run(minimal_single_run_isa_file, tmp_path)
+        result = run.features()
+        df = run.load_dataframe(file_type="processed")
+        assert result["rms"] == pytest.approx(np.sqrt(np.mean(df["value"] ** 2)))
+        assert result["source"]["requested_file_type"] == "auto"
+        assert result["source"]["resolved_file_type"] == "processed"
+        assert result["source"]["file_path"]
+        assert result["excluded_samples"] == 0
+
+    def test_features_exclude_nonfinite_values_and_report_count(self, minimal_single_run_isa_file, tmp_path, monkeypatch):
+        run = self._run(minimal_single_run_isa_file, tmp_path)
+        _, meta = run.load_dataframe_with_meta(file_type="auto")
+        monkeypatch.setattr(run, "load_dataframe_with_meta", lambda file_type: (pd.DataFrame({"value": [3.0, np.nan, np.inf, 4.0]}), meta))
+        result = run.features()
+        assert result["rms"] == pytest.approx(np.sqrt(12.5))
+        assert result["excluded_samples"] == 2
+
+    def test_features_reject_no_finite_values(self, minimal_single_run_isa_file, tmp_path, monkeypatch):
+        run = self._run(minimal_single_run_isa_file, tmp_path)
+        _, meta = run.load_dataframe_with_meta(file_type="auto")
+        monkeypatch.setattr(run, "load_dataframe_with_meta", lambda file_type: (pd.DataFrame({"value": [np.nan, np.inf]}), meta))
+        with pytest.raises(DataFileError, match="no finite signal values"):
+            run.features()
+
+    def test_timeseries_uses_auto_and_shows_file_type(self, minimal_single_run_isa_file, tmp_path):
+        run = self._run(minimal_single_run_isa_file, tmp_path)
+        plot = run.plot_timeseries()
+        assert "processed" in plot.title.text
+
 
 # ---------------------------------------------------------------------------
 # Proxy file_type strict/auto contract
 # ---------------------------------------------------------------------------
+
+class TestMLDatasetCompleteness:
+    def _assay(self, minimal_single_run_isa_file, tmp_path):
+        nav, _ = _build_navigator(minimal_single_run_isa_file, tmp_path)
+        return nav.study("Test Study").assay("a_st01_se01")
+
+    @staticmethod
+    def _rows():
+        rows = pd.DataFrame([
+            {"run_id": "r1", "run_number": 1, "rms": 2.0, "crest_factor": 1.5, "fv_label": "healthy", "status": "ok", "error": None},
+            {"run_id": "r2", "run_number": 2, "rms": np.nan, "crest_factor": np.nan, "fv_label": "fault", "status": "error", "error": "file missing"},
+            {"run_id": "r3", "run_number": 3, "rms": 0.0, "crest_factor": np.nan, "fv_label": "", "status": "ok", "error": None},
+        ])
+        for col in ["requested_file_type", "resolved_file_type", "file_path", "excluded_samples"]:
+            rows[col] = None
+        return rows
+
+    def test_default_reports_failure_and_missing_target(self, minimal_single_run_isa_file, tmp_path, monkeypatch):
+        assay = self._assay(minimal_single_run_isa_file, tmp_path)
+        monkeypatch.setattr(assay, "lifecycle_features", lambda **kwargs: self._rows())
+        with pytest.raises(ValueError) as exc:
+            assay.feature_table(label_column="fv_label", features=["rms", "crest_factor"])
+        message = str(exc.value)
+        assert "2 incomplete" in message and "r2" in message and "file missing" in message
+        assert "r3" in message and "crest_factor" in message and "target" in message
+
+    def test_opt_in_drop_returns_detailed_report(self, minimal_single_run_isa_file, tmp_path, monkeypatch):
+        assay = self._assay(minimal_single_run_isa_file, tmp_path)
+        monkeypatch.setattr(assay, "lifecycle_features", lambda **kwargs: self._rows())
+        data, report = assay.feature_table(label_column="fv_label", features=["rms", "crest_factor"], on_incomplete="drop")
+        assert data["run_id"].tolist() == ["r1"]
+        assert data["target"].tolist() == ["healthy"]
+        assert report["run_id"].tolist() == ["r2", "r3"]
+        assert "file missing" in report.iloc[0]["reasons"][0]
+        assert any("target" in reason for reason in report.iloc[1]["reasons"])
+
+    def test_unsupervised_does_not_require_target_and_rejects_unknown_features(self, minimal_single_run_isa_file, tmp_path, monkeypatch):
+        assay = self._assay(minimal_single_run_isa_file, tmp_path)
+        rows = self._rows().iloc[[0, 2]].copy()
+        for col in ["requested_file_type", "resolved_file_type", "file_path", "excluded_samples"]:
+            rows[col] = None
+        monkeypatch.setattr(assay, "lifecycle_features", lambda **kwargs: rows)
+        data = assay.feature_table(features=["rms"])
+        assert data["run_id"].tolist() == ["r1", "r3"]
+        with pytest.raises(ValueError, match="Unknown signal features"):
+            assay.feature_table(features=["typo"])
+
+    def test_feature_table_requires_selection_and_includes_provenance(self, minimal_single_run_isa_file, tmp_path):
+        assay = self._assay(minimal_single_run_isa_file, tmp_path)
+        assert not hasattr(assay, "to_ml_dataset")
+        with pytest.raises(ValueError, match="at least one feature"):
+            assay.feature_table([])
+        with pytest.raises(ValueError, match="Unknown signal features"):
+            assay.feature_table(["typo"])
+        table = assay.feature_table(["rms", "peak2peak"])
+        assert {"rms", "peak2peak", "file_path", "resolved_file_type", "excluded_samples"}.issubset(table.columns)
+        assert table.iloc[0]["requested_file_type"] == "auto"
+        assert table.iloc[0]["resolved_file_type"] == "processed"
+        assert "crest_factor" not in table.columns
+
+
+class TestFrequencyPlotMetadata:
+    def _assay(self, minimal_multi_run_isa_file, tmp_csv_dir):
+        nav, _ = _build_navigator(minimal_multi_run_isa_file, tmp_csv_dir)
+        return nav.study("Test Study").assay("a_st01_se01")
+
+    @pytest.mark.parametrize("method,plotter_method", [
+        ("plot_frequency_domain", "plot_frequency_domain"),
+        ("plot_psd", "plot_power_spectral_density"),
+        ("plot_spectrogram", "plot_spectrogram"),
+    ])
+    def test_selected_run_rate_is_used(self, minimal_multi_run_isa_file, tmp_csv_dir, monkeypatch, method, plotter_method):
+        assay = self._assay(minimal_multi_run_isa_file, tmp_csv_dir)
+        first, second = assay._assay.runs[:2]
+        first.measurement_params = [ParameterValue(parameter_name="Sampling Rate", value=20, unit="kHz")]
+        second.measurement_params = [ParameterValue(parameter_name="Sampling Rate", value=1.5, unit="MHz")]
+        captured = {}
+        monkeypatch.setattr(assay, "load_dataframe", lambda **kwargs: pd.DataFrame({"time": [0, 1], "value": [1, 2]}))
+        monkeypatch.setattr(assay._plotter, plotter_method, lambda df, **kwargs: captured.update(kwargs))
+        getattr(assay, method)(run_id=second.run_id)
+        assert captured["fs"] == 1_500_000
+
+    def test_run_fft_rejects_unrelated_or_conflicting_rates(self, minimal_multi_run_isa_file, tmp_csv_dir, monkeypatch):
+        assay = self._assay(minimal_multi_run_isa_file, tmp_csv_dir)
+        run = assay.run(assay._assay.runs[0].run_id)
+        run._run.measurement_params = [ParameterValue(parameter_name="Motor speed", value=50, unit="Hz")]
+        with pytest.raises(PlotError, match="unavailable"):
+            run.plot_frequency_domain()
+        run._run.measurement_params = [ParameterValue(parameter_name="Sampling Rate", value=1, unit="kHz"), ParameterValue(parameter_name="Sampling Rate", value=2, unit="kHz")]
+        with pytest.raises(PlotError, match="Conflicting"):
+            run.plot_frequency_domain()
+        captured = {}
+        monkeypatch.setattr(run, "load_dataframe", lambda **kwargs: pd.DataFrame({"time": [0, 1], "value": [1, 2]}))
+        monkeypatch.setattr(run._plotter, "plot_frequency_domain", lambda df, **kwargs: captured.update(kwargs))
+        run.plot_frequency_domain(fs=1234)
+        assert captured["fs"] == 1234
+
+    def test_waterfall_rejects_mixed_rates_and_checks_only_selected_runs(self, minimal_multi_run_isa_file, tmp_csv_dir, monkeypatch):
+        assay = self._assay(minimal_multi_run_isa_file, tmp_csv_dir)
+        first, second = assay._assay.runs[:2]
+        first.measurement_params = [ParameterValue(parameter_name="Sampling Rate", value=1, unit="kHz")]
+        second.measurement_params = [ParameterValue(parameter_name="Sampling Rate", value=2, unit="kHz")]
+        with pytest.raises(PlotError, match="different sampling frequencies"):
+            assay.plot_waterfall(run_ids=[first.run_id, second.run_id])
+        captured = {}
+        monkeypatch.setattr(assay, "load_dataframe", lambda **kwargs: pd.DataFrame({"time": [0, 1], "value": [1, 2]}))
+        monkeypatch.setattr(assay._plotter, "plot_waterfall", lambda dfs, **kwargs: captured.update(kwargs))
+        assay.plot_waterfall(run_ids=[second.run_id])
+        assert captured["fs"] == 2000
+
+    def test_no_implicit_run_for_multi_run_assay(self, minimal_multi_run_isa_file, tmp_csv_dir):
+        assay = self._assay(minimal_multi_run_isa_file, tmp_csv_dir)
+        with pytest.raises(PlotError, match="Select a run_id"):
+            assay.plot_frequency_domain(df=pd.DataFrame({"time": [0, 1], "value": [1, 2]}))
+        for invalid in [0, -1, float('nan'), float('inf')]:
+            with pytest.raises(PlotError, match="positive finite"):
+                assay.plot_psd(run_id=assay._assay.runs[0].run_id, fs=invalid)
+
 
 class TestProxyFileTypeContract:
     @staticmethod
@@ -624,6 +772,10 @@ class TestProxyFileTypeContract:
         assert meta.requested_file_type == "auto"
         assert meta.resolved_file_type == "raw"
         assert meta.file_path == str(tmp_csv)
+        result = assay.run("run_01").features()
+        assert result["source"]["resolved_file_type"] == "raw"
+        assert result["source"]["file_path"] == str(tmp_csv)
+        assert "raw" in assay.run("run_01").plot_timeseries().title.text
 
     def test_processed_missing_raises_via_proxy(
         self, minimal_single_run_isa, tmp_csv, tmp_path
@@ -838,19 +990,54 @@ class TestAssayProxyUnitInference:
         assay = nav.study("Test Study").assay("a_st01_se01")
         assert assay._infer_unit() is None
 
-    def test_alpha_short_value_can_be_inferred_as_unit(
+    def test_alpha_short_value_is_not_inferred_as_unit(
         self, minimal_params_isa_file, tmp_path
     ):
         isa_file = self._mutate_measurement_value(minimal_params_isa_file, tmp_path, "nm")
         nav, _ = _build_navigator(isa_file, tmp_path)
         assay = nav.study("Test Study").assay("a_st01_se01")
-        assert assay._infer_unit() == "nm"
+        assert assay._infer_unit() is None
+
+    def test_plot_label_and_capability_use_only_explicit_unit(self, minimal_single_run_isa_file, tmp_path):
+        nav, _ = _build_navigator(minimal_single_run_isa_file, tmp_path)
+        assay = nav.study("Test Study").assay("a_st01_se01")
+        run = assay._assay.runs[0]
+        run.measurement_params = [ParameterValue(parameter_name="Sensor Orientation", value=90, unit="°")]
+        assert assay._infer_unit() is None
+        assert "°" not in assay._ylabel()
+        assert not assay.analysis_capabilities().measured_unit.available
+        run.measurement_params.append(ParameterValue(parameter_name="Measured Unit", value="g"))
+        assert assay._infer_unit() == "g"
+        assert "(g)" in assay._ylabel()
+        assert assay.analysis_capabilities().measured_unit.value == "g"
+
+    def test_assay_unit_is_not_shared_when_runs_disagree(self, minimal_single_run_isa_file, tmp_path):
+        nav, _ = _build_navigator(minimal_single_run_isa_file, tmp_path)
+        assay = nav.study("Test Study").assay("a_st01_se01")
+        run = assay._assay.runs[0]
+        run.measurement_params = [ParameterValue(parameter_name="Measured Unit", value="g")]
+        other = run.model_copy(deep=True)
+        other.measurement_params = [ParameterValue(parameter_name="Measured Unit", value="m/s²")]
+        assay._assay.runs.append(other)
+        assert assay._infer_unit() is None
+        assert not assay.analysis_capabilities().measured_unit.available
+        assert not assay.analysis_capabilities().physical_unit_interpretation.available
 
 
 class TestRunAnalysisCapabilities:
     def _run(self, minimal_single_run_isa_file, tmp_path) -> RunProxy:
         nav, _ = _build_navigator(minimal_single_run_isa_file, tmp_path)
         return nav.study("Test Study").assay("a_st01_se01").run("run_01")
+
+    def test_quantity_unit_advisory_uses_run_and_sensor_identifiers(self, minimal_single_run_isa_file, tmp_path):
+        run = self._run(minimal_single_run_isa_file, tmp_path)
+        run._assay.sensor.quantity_kind_identifier = "http://qudt.org/vocab/quantitykind/Acceleration"
+        run._run.measurement_params = [ParameterValue(parameter_name="Measured Unit", value="g", value_identifier="http://qudt.org/vocab/unit/GM")]
+        assert run.quantity_unit_advisory().status == "warning"
+        run._run.measurement_params[0].value_identifier = "http://qudt.org/vocab/unit/G"
+        assert run.quantity_unit_advisory().status == "no_known_mismatch"
+        run._run.measurement_params[0].value_identifier = None
+        assert run.quantity_unit_advisory().status == "not_checked"
 
     def test_missing_sampling_rate_does_not_block_time_domain_analysis(
         self, minimal_single_run_isa_file, tmp_path

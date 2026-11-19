@@ -19,6 +19,7 @@ Entry point::
 from __future__ import annotations
 
 import logging
+import math
 import re
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Literal
@@ -34,7 +35,9 @@ from .errors import (
     StudyNotFoundError,
     ValidationError,
 )
-from .capabilities import assay_analysis_capabilities, run_analysis_capabilities
+from .factor_utils import resolve_factor_csv_value
+from .capabilities import assay_analysis_capabilities, run_analysis_capabilities, resolve_measured_unit, resolve_sampling_frequency
+from .quantity_unit import QuantityUnitAdvisory, check_quantity_unit
 from .schemas import (
     AssayModel,
     AssayOverview,
@@ -62,7 +65,29 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger("isa_phm")
 _FAULT_TYPE_RE = re.compile(r"\b(fault|damage|rul|defect|degradation)\b", re.IGNORECASE)
-_UNIT_VALUE_RE = re.compile(r"^[A-Za-z]{1,8}$")
+
+
+def _plot_sampling_frequency(runs: list[RunRecord], fs: float | None) -> float:
+    """Resolve only explicit, unambiguous rates for the selected measurements."""
+    if fs is not None:
+        try:
+            value = float(fs)
+        except (TypeError, ValueError):
+            raise PlotError("Sampling frequency fs must be a positive finite number in Hz.") from None
+        if not math.isfinite(value) or value <= 0:
+            raise PlotError("Sampling frequency fs must be a positive finite number in Hz.")
+        return value
+    if not runs:
+        raise PlotError("No measurement was selected. Select a run or provide fs explicitly.")
+    rates = []
+    for run in runs:
+        resolution = resolve_sampling_frequency(run.measurement_params)
+        if not resolution.available or resolution.value is None:
+            raise PlotError(f"Sampling frequency for run '{run.run_id}' is unavailable: {resolution.reason} Pass fs explicitly in Hz if known.")
+        rates.append(float(resolution.value))
+    if any(rate != rates[0] for rate in rates[1:]):
+        raise PlotError("Selected runs have different sampling frequencies; select runs with the same rate or pass fs explicitly in Hz.")
+    return rates[0]
 
 
 # ---------------------------------------------------------------------------
@@ -298,6 +323,8 @@ class StudyProxy:
                 sensor_alias=a.sensor.alias,
                 technology_type=a.sensor.technology_type,
                 measurement_type=a.sensor.measurement_type,
+                quantity_kind_identifier=a.sensor.quantity_kind_identifier,
+                physical_device_id=a.sensor.physical_device_id,
                 n_runs=len(a.runs),
                 n_raw_files=len([r for r in a.runs if r.raw_file and r.raw_file.path]),
                 n_processed_files=len([r for r in a.runs if r.processed_file and r.processed_file.path]),
@@ -310,6 +337,7 @@ class StudyProxy:
                 factor_name=f.factor_name,
                 factor_type=f.factor_type,
                 unit=f.unit,
+                unit_identifier=f.unit_identifier,
             )
             for f in self._study.factors
         ]
@@ -595,13 +623,11 @@ class StudyProxy:
         means:   list[float] = []
         uppers:  list[float] = []
         lowers:  list[float] = []
-        unit: str | None = None
+        units: list[str | None] = []
 
         for summary in self.list_assays():
             a_model = self._assay_by_id[summary.assay_id]
             a = self._assay_proxy(a_model)
-            if unit is None:
-                unit = a._infer_unit()
             try:
                 df = a.load_dataframe(file_type=file_type)
                 df_clean = a.fix_outliers(
@@ -617,6 +643,7 @@ class StudyProxy:
                 q3  = float(vals.quantile(0.75))
                 iqr = q3 - q1
                 sensors.append(summary.sensor_alias)
+                units.append(a._infer_unit())
                 q1s.append(q1)
                 medians.append(med)
                 q3s.append(q3)
@@ -632,6 +659,7 @@ class StudyProxy:
             mean=means, upper=uppers, lower=lowers,
         ))
 
+        unit = units[0] if units and units[0] is not None and all(item == units[0] for item in units) else None
         resolved_ylabel = ylabel or (f"Amplitude ({unit})" if unit else "Amplitude")
         p = figure(
             x_range=sensors,
@@ -1373,6 +1401,13 @@ class AssayProxy:
             technology_type=self._assay.sensor.technology_type,
             technology_platform=self._assay.sensor.technology_platform,
             measurement_type=self._assay.sensor.measurement_type,
+            quantity_kind_identifier=self._assay.sensor.quantity_kind_identifier,
+            sensor_datasheet=self._assay.sensor.sensor_datasheet,
+            physical_device_id=self._assay.sensor.physical_device_id,
+            physical_device_name=self._assay.sensor.physical_device_name,
+            physical_device_model=self._assay.sensor.physical_device_model,
+            physical_device_serial_number=self._assay.sensor.physical_device_serial_number,
+            physical_device_datasheet=self._assay.sensor.physical_device_datasheet,
             n_runs=len(self._assay.runs),
             runs=run_summaries,
         )
@@ -1509,34 +1544,54 @@ class AssayProxy:
         pd.DataFrame with columns:
             run_id, run_number, study_id, assay_id,
             rms, max, mean, peak2peak, kurtosis, std, crest_factor, skewness,
+            status, error, requested_file_type, resolved_file_type, file_path,
+            excluded_samples,
             fv_<factor_name>…
+        Failed measurements remain as rows with status "error" and missing features.
         """
         return self._integrator.lifecycle_features_df(
             self._assay, study_id=self._study.study_id, file_type=file_type, n_workers=n_workers
         )
 
-    def to_ml_dataset(
+    def feature_table(
+        self,
+        features: list[str],
+        label_column: str | None = None,
+        file_type: Literal["raw", "processed", "auto"] = "auto",
+        n_workers: int | None = None,
+        on_incomplete: Literal["raise", "drop"] = "raise",
+    ) -> pd.DataFrame | tuple[pd.DataFrame, pd.DataFrame]:
+        """Calculate chosen signal features with file provenance; no model is trained.
+
+        Auto prefers processed files when recorded, otherwise raw. Missing
+        results raise by default; explicit ``on_incomplete='drop'`` returns the
+        table and a report of exclusions. A requested label is not converted.
+        """
+        from .utils import FEATURE_NAMES
+
+        if not isinstance(features, list) or not features:
+            raise ValueError("Choose at least one feature as a list of names.")
+        if len(set(features)) != len(features):
+            raise ValueError("Feature names must not be duplicated.")
+        unknown = [name for name in features if name not in FEATURE_NAMES]
+        if unknown:
+            raise ValueError(f"Unknown signal features: {unknown}. Available: {list(FEATURE_NAMES)}")
+        return self._build_feature_table(
+            label_column=label_column, feature_columns=features, file_type=file_type,
+            n_workers=n_workers, on_incomplete=on_incomplete, include_provenance=True,
+        )
+
+    def _build_feature_table(
         self,
         label_column: str | None = None,
         feature_columns: list[str] | None = None,
         file_type: Literal["raw", "processed", "auto"] = "processed",
         n_workers: int | None = None,
-    ) -> pd.DataFrame:
+        on_incomplete: Literal["raise", "drop"] = "raise",
+        include_provenance: bool = False,
+    ) -> pd.DataFrame | tuple[pd.DataFrame, pd.DataFrame]:
         """
-        Return a clean, ML-ready DataFrame built from lifecycle features.
-
-        Each row is one run.  Feature columns are the scalar lifecycle statistics
-        (rms, kurtosis, etc.).  An optional *label_column* names the regression
-        or classification target — pulled from the factor-value columns
-        (``fv_*``) already present in the lifecycle DataFrame.
-
-        No modelling is done here.  This method only shapes and cleans the data
-        so it can be passed directly to scikit-learn, XGBoost, or any other
-        ML framework::
-
-            X = assay.to_ml_dataset(label_column="fv_Bearing Lifetime")
-            y = X.pop("target")
-            # → X, y ready for sklearn
+        Build an explicitly selected feature table; no model is trained.
 
         Parameters
         ----------
@@ -1551,21 +1606,37 @@ class AssayProxy:
             std, crest_factor, skewness.
         file_type : "processed" | "raw" | "auto"
         n_workers : int | None
+        on_incomplete : "raise" | "drop"
+            Raise by default. With "drop", return (dataset, exclusion_report).
+            The report identifies each excluded run and its reasons.
+        include_provenance : bool
+            Include source file type, path, and excluded sample count.
 
         Returns
         -------
-        pd.DataFrame
-            Columns: run_id, run_number, <features>, [target]
+        pd.DataFrame, or (pd.DataFrame, pd.DataFrame) when on_incomplete="drop"
+            Dataset columns: run_id, run_number, <features>, [target].
         """
         _DEFAULT_FEATURES = [
             "rms", "max", "mean", "peak2peak",
             "kurtosis", "std", "crest_factor", "skewness",
         ]
+        if on_incomplete not in ("raise", "drop"):
+            raise ValueError("on_incomplete must be 'raise' or 'drop'.")
         lc = self.lifecycle_features(file_type=file_type, n_workers=n_workers)
+        if lc.empty:
+            raise ValueError("No measurements available to build a feature table.")
 
         keep = ["run_id", "run_number"]
-        feat_cols = feature_columns or _DEFAULT_FEATURES
-        keep += [c for c in feat_cols if c in lc.columns]
+        feat_cols = _DEFAULT_FEATURES if feature_columns is None else feature_columns
+        if not feat_cols:
+            raise ValueError("At least one feature column is required.")
+        missing_columns = [c for c in feat_cols if c not in lc.columns]
+        if missing_columns:
+            raise ValueError(f"Feature columns not found: {missing_columns}.")
+        keep += feat_cols
+        if include_provenance:
+            keep += ["requested_file_type", "resolved_file_type", "file_path", "excluded_samples"]
 
         if label_column is not None:
             if label_column not in lc.columns:
@@ -1576,13 +1647,36 @@ class AssayProxy:
                 )
             keep.append(label_column)
 
-        df = lc[keep].copy()
-        df = df.dropna(subset=[c for c in feat_cols if c in df.columns])
+        import numpy as np
+
+        exclusions = []
+        for idx, row in lc.iterrows():
+            reasons = []
+            if row.get("status") == "error":
+                reasons.append(f"feature calculation failed: {row.get('error') or 'unknown error'}")
+            missing_features = [c for c in feat_cols if not isinstance(row[c], (int, float, np.number)) or not np.isfinite(row[c])]
+            if missing_features:
+                reasons.append(f"missing or non-finite features: {', '.join(missing_features)}")
+            if label_column is not None:
+                target = row[label_column]
+                if pd.isna(target) or (isinstance(target, str) and not target.strip()) or (isinstance(target, (int, float, np.number)) and not np.isfinite(target)):
+                    reasons.append(f"missing or non-finite target: {label_column}")
+            if reasons:
+                exclusions.append({"index": idx, "run_id": row["run_id"], "run_number": row["run_number"], "reasons": reasons})
+        if exclusions and on_incomplete == "raise":
+            details = "; ".join(f"{item['run_id']}: {', '.join(item['reasons'])}" for item in exclusions)
+            raise ValueError(f"Cannot build feature table: {len(exclusions)} incomplete measurement(s). {details}. Inspect lifecycle_features() or explicitly use on_incomplete='drop' to receive an exclusion report.")
+
+        df = lc.drop(index=[item["index"] for item in exclusions])[keep].copy()
 
         if label_column is not None:
             df = df.rename(columns={label_column: "target"})
 
-        return df.reset_index(drop=True)
+        df = df.reset_index(drop=True)
+        if on_incomplete == "drop":
+            report = pd.DataFrame([{k: v for k, v in item.items() if k != "index"} for item in exclusions], columns=["run_id", "run_number", "reasons"])
+            return df, report
+        return df
 
     # ------------------------------------------------------------------
     # Quality checks
@@ -1632,6 +1726,7 @@ class AssayProxy:
                 f"Available: {available}"
             )
         return RunProxy(record, self._assay, self._study, self._inv, self._integrator, self._plotter)
+
     def analysis_capabilities(self):
         """Report analyses supported consistently across this assay's runs."""
         return assay_analysis_capabilities(self._assay)
@@ -1749,8 +1844,7 @@ class AssayProxy:
             True (default) — magnitude in dB; good for spotting fault sidebands.
             False — linear amplitude; easier to read peak values in signal units.
         """
-        if fs is None:
-            fs = self._infer_fs()
+        fs = self._plot_fs(run_id, fs)
         if df is None:
             df = self.load_dataframe(run_id=run_id, file_type=file_type)
         label = run_id or (self._assay.runs[0].run_id if self._assay.runs else "")
@@ -1799,14 +1893,7 @@ class AssayProxy:
             Window function name passed to ``scipy.signal.welch`` (default "hann").
         file_type : "processed" | "raw" | "auto"
         """
-        if fs is None:
-            fs = self._infer_fs()
-        if fs is None:
-            raise PlotError(
-                "fs (sampling frequency) is required for plot_psd. "
-                "Pass fs= explicitly or ensure the ISA-JSON protocol parameters "
-                "include sampling frequency in Hz."
-            )
+        fs = self._plot_fs(run_id, fs)
         df = self.load_dataframe(run_id=run_id, file_type=file_type)
         label = run_id or (self._assay.runs[0].run_id if self._assay.runs else "")
         return self._plotter.plot_power_spectral_density(
@@ -1852,14 +1939,7 @@ class AssayProxy:
             Fraction of window overlap 0–1 (default 0.75).
         file_type : "processed" | "raw" | "auto"
         """
-        if fs is None:
-            fs = self._infer_fs()
-        if fs is None:
-            raise PlotError(
-                "fs (sampling frequency) is required for plot_spectrogram. "
-                "Pass fs= explicitly or ensure the ISA-JSON protocol parameters "
-                "include sampling frequency in Hz."
-            )
+        fs = self._plot_fs(run_id, fs)
         df = self.load_dataframe(run_id=run_id, file_type=file_type)
         label = run_id or (self._assay.runs[0].run_id if self._assay.runs else "")
         return self._plotter.plot_spectrogram(
@@ -1906,20 +1986,21 @@ class AssayProxy:
             Vertical spacing between traces as a fraction of the PSD range.
         file_type : "processed" | "raw" | "auto"
         """
-        if fs is None:
-            fs = self._infer_fs()
-        if fs is None:
-            raise PlotError(
-                "fs (sampling frequency) is required for plot_waterfall. "
-                "Pass fs= explicitly or ensure the ISA-JSON protocol parameters "
-                "include sampling frequency in Hz."
-            )
         all_runs = self._assay.runs
         if run_ids is not None:
+            missing = set(run_ids) - {r.run_id for r in all_runs}
+            if missing:
+                raise RunNotFoundError(f"Unknown runs for waterfall: {sorted(missing)}")
             selected = [r for r in all_runs if r.run_id in run_ids]
         else:
+            if n_runs <= 0:
+                raise PlotError("n_runs must be positive.")
             step = max(1, len(all_runs) // n_runs)
             selected = all_runs[::step][:n_runs]
+
+        if not selected:
+            raise PlotError("No measurements selected for the waterfall plot.")
+        fs = _plot_sampling_frequency(selected, fs)
 
         dfs: dict[str, pd.DataFrame] = {}
         for run in selected:
@@ -2357,47 +2438,10 @@ class AssayProxy:
     # Private helpers
     # ------------------------------------------------------------------
 
-    # Units that describe protocol/timing metadata, not the measured signal.
-    _SKIP_UNITS: frozenset[str] = frozenset(
-        {"hz", "khz", "mhz", "min", "s", "ms", "sec", "second", "seconds",
-         "hr", "hour", "hours"}
-    )
-
     def _infer_unit(self) -> str | None:
-        """
-        Attempt to infer the signal measurement unit from protocol parameters.
-
-        Checks ``pv.unit`` (resolved ontology string) first, skipping
-        frequency units (Hz/kHz — those describe sampling rate, not the
-        measured quantity) and time/duration units (min, s, ms, hr — those
-        describe sampling intervals, not the physical signal).
-
-        When no ``pv.unit`` is present, checks whether ``pv.parameter_name``
-        contains the word "unit" (case-insensitive) — for example
-        ``"Measured Unit"``, ``"Signal Unit"``, ``"Output Unit"`` — and, if
-        so, treats ``pv.value`` directly as the unit string.  This handles
-        arbitrary user-defined unit parameter names without requiring a fixed
-        canonical name.
-
-        Falls back to ``pv.value`` when it looks like a short alphabetical
-        unit string (e.g. ``"nm"``).
-        """
-        if not self._assay.runs:
-            return None
-        for pv in self._assay.runs[0].measurement_params:
-            if pv.unit and pv.unit.lower() not in self._SKIP_UNITS and "hz" not in pv.unit.lower():
-                return pv.unit
-            if not pv.unit and isinstance(pv.value, str):
-                v = pv.value.strip()
-                if not v or v.lower() in self._SKIP_UNITS:
-                    continue
-                # Parameter name contains "unit" → trust the value as-is
-                if pv.parameter_name and "unit" in pv.parameter_name.lower():
-                    return v
-                # Generic fallback: short alphabetical string
-                if _UNIT_VALUE_RE.fullmatch(v) is not None:
-                    return v
-        return None
+        """Return the explicit measured unit shared by all assay runs, if any."""
+        resolution = assay_analysis_capabilities(self._assay).measured_unit
+        return resolution.value if resolution.available and isinstance(resolution.value, str) else None
 
     def _ylabel(self) -> str:
         """Build a y-axis label: measurement_type (unit) if unit is known."""
@@ -2406,23 +2450,19 @@ class AssayProxy:
         return f"{label} ({unit})" if unit else label
 
     def _infer_fs(self) -> float | None:
-        """
-        Attempt to infer sampling frequency from the first run's measurement
-        protocol parameters.  Returns None if no Hz/kHz parameter is found.
-        """
-        if not self._assay.runs:
-            return None
-        for pv in self._assay.runs[0].measurement_params:
-            if pv.unit and ("hz" in pv.unit.lower()):
-                try:
-                    raw_val = str(pv.value).replace(",", ".")
-                    val = float(raw_val)
-                    if "khz" in pv.unit.lower():
-                        return val * 1000.0
-                    return val
-                except (ValueError, TypeError):
-                    continue
-        return None
+        """Return the explicitly recorded rate only if all runs agree."""
+        resolution = assay_analysis_capabilities(self._assay).sampling_frequency
+        return float(resolution.value) if resolution.available and resolution.value is not None else None
+
+    def _plot_fs(self, run_id: str | None, fs: float | None) -> float:
+        if fs is not None:
+            return _plot_sampling_frequency([], fs)
+        if run_id is None and len(self._assay.runs) != 1:
+            raise PlotError("Select a run_id or pass fs explicitly when an assay has multiple measurements.")
+        run = self._assay.get_run(run_id) if run_id is not None else self._assay.runs[0]
+        if run is None:
+            raise RunNotFoundError(f"Run '{run_id}' not found in assay '{self._assay.assay_id}'.")
+        return _plot_sampling_frequency([run], None)
 
     def _first_or_run(self, run_id: str | None) -> "RunRecord | None":
         """Return the named run, or the first run when run_id is None."""
@@ -2482,17 +2522,67 @@ class RunProxy:
             processed_file_path=(
                 self._run.processed_file.path if self._run.processed_file else None
             ),
-            factor_values=self._run.factor_values,
+            factor_values=self.factor_values(),
             measurement_params=[pv.model_dump() for pv in self._run.measurement_params],
             processing_params=[pv.model_dump() for pv in self._run.processing_params],
         )
+
     def analysis_capabilities(self):
         """Report which analyses are supported by this run's available metadata."""
         return run_analysis_capabilities(self._run)
 
+    def quantity_unit_advisory(self) -> QuantityUnitAdvisory:
+        """Check this run's explicit quantity and measured-unit identifiers."""
+        resolved = resolve_measured_unit(self._run.measurement_params)
+        if not resolved.available:
+            return QuantityUnitAdvisory("not_checked", reason=resolved.reason)
+        params = [p for p in self._run.measurement_params
+                  if " ".join(p.parameter_name.casefold().split()) == "measured unit"]
+        identifiers = {p.value_identifier for p in params}
+        if len(identifiers) != 1 or None in identifiers or "" in identifiers:
+            return QuantityUnitAdvisory("not_checked", reason="Measured unit identifier is missing or ambiguous.")
+        return check_quantity_unit(self._assay.sensor.quantity_kind_identifier, next(iter(identifiers)))
+
     def factor_values(self) -> dict[str, object]:
-        """Return study-level factor values for this run."""
-        return dict(self._run.factor_values)
+        """Return study-level factor values for this run, with CSV paths resolved."""
+        data_root = getattr(self._integrator, "_data_root", None)
+        return {
+            k: resolve_factor_csv_value(v, data_root)
+            for k, v in self._run.factor_values.items()
+        }
+
+    def load_factor_timeseries(self, factor_name: str) -> pd.DataFrame:
+        """Load the full timeseries DataFrame for a CSV-backed factor value.
+
+        Parameters
+        ----------
+        factor_name : str
+            The factor whose value is a relative ``.csv`` path.
+
+        Returns
+        -------
+        pd.DataFrame
+            Full CSV contents (no header assumed).
+
+        Raises
+        ------
+        ValueError
+            When the factor value is not a CSV path, or data_root is unset.
+        """
+        from .factor_utils import load_factor_csv_dataframe
+
+        raw_value = self._run.factor_values.get(factor_name)
+        if not isinstance(raw_value, str) or not raw_value.strip().lower().endswith(".csv"):
+            raise ValueError(
+                f"Factor '{factor_name}' is not a CSV-backed value "
+                f"(stored value: {raw_value!r})."
+            )
+        data_root = getattr(self._integrator, "_data_root", None)
+        if data_root is None:
+            raise ValueError(
+                "data_root is not set on the integrator — cannot resolve factor CSV path."
+            )
+        return load_factor_csv_dataframe(raw_value, data_root)
 
     def load_dataframe(self, file_type: Literal["raw", "processed", "auto"] = "processed") -> pd.DataFrame:
         """Load this run's data file into a DataFrame."""
@@ -2513,6 +2603,49 @@ class RunProxy:
             study_id=self._study.study_id,
             run_id=self._run.run_id,
             file_type=file_type,
+        )
+
+    def features(self, file_type: Literal["raw", "processed", "auto"] = "auto") -> dict:
+        """Calculate signal features for this run, including source provenance.
+
+        Non-finite values are excluded and counted. No filtering or detrending
+        is performed. Auto prefers a recorded processed file, otherwise raw.
+        """
+        import numpy as np
+        from .utils import compute_features
+
+        df, metadata = self.load_dataframe_with_meta(file_type=file_type)
+        values = df["value"].to_numpy(dtype=float)
+        finite = np.isfinite(values)
+        if not finite.any():
+            raise DataFileError(f"Run '{self.run_id}' has no finite signal values to analyse.")
+        return {
+            **compute_features(values[finite]),
+            "excluded_samples": int((~finite).sum()),
+            "source": metadata.model_dump(),
+        }
+
+    def plot_timeseries(
+        self,
+        file_type: Literal["raw", "processed", "auto"] = "auto",
+        max_points: int = 10_000,
+        title: str | None = None,
+        xlabel: str | None = None,
+        ylabel: str | None = None,
+        width: int | None = None,
+        height: int | None = None,
+    ) -> object:
+        """Plot this measurement, showing the chosen data type in the title."""
+        df, metadata = self.load_dataframe_with_meta(file_type=file_type)
+        unit = resolve_measured_unit(self._run.measurement_params)
+        return self._plotter.plot_timeseries(
+            df,
+            max_points=max_points,
+            xlabel=xlabel or "time",
+            ylabel=ylabel or (f"value ({unit.value})" if unit.available else "value"),
+            title=title or f"{self._assay.assay_id} / {self.run_id} — Waveform ({metadata.resolved_file_type})",
+            width=width,
+            height=height,
         )
 
     def plot_distribution(
@@ -2552,15 +2685,7 @@ class RunProxy:
         height: int | None = None,
     ) -> object:
         """FFT magnitude spectrum."""
-        if fs is None:
-            for pv in self._run.measurement_params:
-                if pv.unit and "hz" in pv.unit.lower():
-                    try:
-                        v = float(str(pv.value).replace(",", "."))
-                        fs = v * 1000 if "khz" in pv.unit.lower() else v
-                        break
-                    except (ValueError, TypeError):
-                        pass
+        fs = _plot_sampling_frequency([self._run], fs)
         df = self.load_dataframe(file_type=file_type)
         return self._plotter.plot_frequency_domain(
             df,

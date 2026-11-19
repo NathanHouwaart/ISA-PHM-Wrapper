@@ -12,9 +12,12 @@ Quick start::
 """
 
 from .wrapper import ISAWrapper
+from .attachments import Attachment
+from .catalogue import CATALOGUE_VERSION, lookup_quantity, lookup_unit
 from .plotter import ISAPlotter, PlotConfig
 from .proxy import AssayGroup
 from .semantic import SemanticNormalizer
+from .quantity_unit import QuantityUnitAdvisory, check_quantity_unit
 from .tools import ToolRegistry
 from .schemas import (
     AnalysisCapabilities,
@@ -46,10 +49,16 @@ from .errors import (
 
 __all__ = [
     "ISAWrapper",
+    "Attachment",
+    "CATALOGUE_VERSION",
+    "lookup_quantity",
+    "lookup_unit",
     "ISAPlotter",
     "PlotConfig",
     "AssayGroup",
     "SemanticNormalizer",
+    "QuantityUnitAdvisory",
+    "check_quantity_unit",
     "ToolRegistry",
     "AnalysisCapabilities",
     "AssayAnalysisCapabilities",

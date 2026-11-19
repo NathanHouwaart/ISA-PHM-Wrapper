@@ -37,6 +37,7 @@ from typing import Any
 from pydantic import ValidationError as PydanticValidationError
 
 from .errors import ExtractionError
+from .utils import is_unavailable_raw_placeholder
 from .schemas import (
     AssayModel,
     CharacteristicCategory,
@@ -134,6 +135,29 @@ class MetadataExtractor:
 
         # Factors
         factors = [self._extract_factor(f) for f in study.get("factors", [])]
+
+        # ISA stores units on per-sample factor values. Only expose a shared
+        # factor-level identifier when all populated unit annotations agree.
+        factor_by_id = {factor.factor_id: factor for factor in factors}
+        factor_units: dict[str, set[tuple[str | None, str | None]]] = {}
+        for sample_ref in study.get("materials", {}).get("samples", []):
+            sample = resolver.try_resolve(sample_ref)
+            if not isinstance(sample, dict):
+                continue
+            for factor_value in sample.get("factorValues", []):
+                category = resolver.try_resolve(factor_value.get("category"))
+                unit = resolver.try_resolve(factor_value.get("unit"))
+                if not isinstance(category, dict) or not isinstance(unit, dict):
+                    continue
+                factor_id = category.get("@id", "")
+                symbol = resolver.get_unit_str(factor_value.get("unit"))
+                identifier = unit.get("termAccession") or None
+                factor_units.setdefault(factor_id, set()).add((symbol, identifier))
+        for factor_id, units in factor_units.items():
+            if factor_id in factor_by_id and len(units) == 1:
+                symbol, identifier = next(iter(units))
+                factor_by_id[factor_id].unit = symbol or factor_by_id[factor_id].unit
+                factor_by_id[factor_id].unit_identifier = identifier
 
         # Per-sample factor value index (sample_@id → {factor_name: value}).
         # Key "" holds the study-level fallback (first non-empty sample).
@@ -279,6 +303,7 @@ class MetadataExtractor:
         return ProtocolModel(
             id=proto.get("@id", ""),
             name=proto.get("name", ""),
+            description=proto.get("description") or "",
             protocol_type=proto_type,
             parameters=parameters,
             sensor_id=sensor_id,
@@ -304,6 +329,8 @@ class MetadataExtractor:
         measurement_type = resolver.get_annotation_value(
             assay.get("measurementType"), default=""
         )
+        measurement_annotation = resolver.try_resolve(assay.get("measurementType"))
+        quantity_kind_identifier = measurement_annotation.get("termAccession") or None if isinstance(measurement_annotation, dict) else None
         tech_platform = assay.get("technologyPlatform", "")
 
         # Build data file index: @id → DataFile.
@@ -349,6 +376,7 @@ class MetadataExtractor:
 
         # Prefer the "sensor alias" comment on the assay over the filename-based ID.
         sensor_alias = assay_id
+        assay_comments = {str(comment.get("name", "")).lower().strip(): comment.get("value") for comment in assay.get("comments", [])}
         for comment in assay.get("comments", []):
             if comment.get("name", "").lower().strip() == "sensor alias":
                 value = comment.get("value", "").strip()
@@ -362,6 +390,13 @@ class MetadataExtractor:
             technology_type=tech_type,
             technology_platform=tech_platform,
             measurement_type=measurement_type,
+            quantity_kind_identifier=quantity_kind_identifier,
+            sensor_datasheet=assay_comments.get("datasheet") or None,
+            physical_device_id=assay_comments.get("physical device id") or None,
+            physical_device_name=assay_comments.get("physical device name") or None,
+            physical_device_model=assay_comments.get("physical device model") or None,
+            physical_device_serial_number=assay_comments.get("physical device serial number") or None,
+            physical_device_datasheet=assay_comments.get("physical device datasheet") or None,
         )
 
         # Build parameter definition lookup (id → name) for this assay.
@@ -385,6 +420,8 @@ class MetadataExtractor:
         """Build @id → DataFile index from assay.dataFiles[]."""
         index: dict[str, DataFile] = {}
         for df in assay.get("dataFiles", []):
+            if is_unavailable_raw_placeholder(df):
+                continue
             df_id = df.get("@id", "")
             name = df.get("name", "")
             file_type = df.get("type", "")
@@ -636,9 +673,18 @@ def _resolve_param_value(
             param_name = cat_id  # Fall back to @id string.
 
     value = pv.get("value")
+    value_identifier = None
+    if isinstance(value, dict):
+        annotation = resolver.try_resolve(value) or value
+        if not isinstance(annotation.get("annotationValue"), str):
+            raise ValueError("Invalid ontology annotation parameter value")
+        value_identifier = annotation.get("termAccession") or None
+        value = annotation.get("annotationValue")
     unit = resolver.get_unit_str(pv.get("unit"))
+    unit_annotation = resolver.try_resolve(pv.get("unit"))
+    unit_identifier = unit_annotation.get("termAccession") or None if isinstance(unit_annotation, dict) else None
 
-    return ParameterValue(parameter_name=param_name, value=value, unit=unit)
+    return ParameterValue(parameter_name=param_name, value=value, unit=unit, unit_identifier=unit_identifier, value_identifier=value_identifier)
 
 
 def _make_run_id(run_number: int, max_runs: int) -> str:

@@ -74,6 +74,8 @@ class ParameterValue(BaseModel):
     parameter_name: str
     value: str | int | float | bool | None
     unit: str | None = None
+    unit_identifier: str | None = None
+    value_identifier: str | None = None
 
     def __str__(self) -> str:
         if self.unit:
@@ -128,6 +130,7 @@ class ProtocolModel(BaseModel):
 
     id: str
     name: str
+    description: str = ""
     protocol_type: str  # annotationValue of protocolType
     parameters: list[ProtocolParameter] = Field(default_factory=list)
     sensor_id: str | None = None  # Extracted from protocol comments
@@ -141,6 +144,13 @@ class SensorInfo(BaseModel):
     technology_type: str  # e.g., "Accelerometer"
     technology_platform: str  # e.g., "Wilcoxon 786B-10"
     measurement_type: str  # e.g., "Vibration"
+    quantity_kind_identifier: str | None = None
+    sensor_datasheet: str | None = None
+    physical_device_id: str | None = None
+    physical_device_name: str | None = None
+    physical_device_model: str | None = None
+    physical_device_serial_number: str | None = None
+    physical_device_datasheet: str | None = None
 
 
 class FactorModel(BaseModel):
@@ -150,6 +160,7 @@ class FactorModel(BaseModel):
     factor_name: str
     factor_type: str  # annotationValue (e.g., "Operating condition")
     unit: str | None = None
+    unit_identifier: str | None = None
     description: str | None = None
 
 
@@ -346,6 +357,7 @@ class FactorSummary(BaseModel):
     factor_name: str
     factor_type: str
     unit: str | None = None
+    unit_identifier: str | None = None
 
 
 class RunSummary(BaseModel):
@@ -364,6 +376,8 @@ class AssaySummary(BaseModel):
     sensor_alias: str
     technology_type: str
     measurement_type: str
+    quantity_kind_identifier: str | None = None
+    physical_device_id: str | None = None
     n_runs: int
     n_raw_files: int = 0
     n_processed_files: int = 0
@@ -376,6 +390,13 @@ class AssayOverview(BaseModel):
     technology_type: str
     technology_platform: str
     measurement_type: str
+    quantity_kind_identifier: str | None = None
+    sensor_datasheet: str | None = None
+    physical_device_id: str | None = None
+    physical_device_name: str | None = None
+    physical_device_model: str | None = None
+    physical_device_serial_number: str | None = None
+    physical_device_datasheet: str | None = None
     n_runs: int
     runs: list[RunSummary] = Field(default_factory=list)
 

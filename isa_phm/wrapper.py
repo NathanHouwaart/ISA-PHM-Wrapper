@@ -32,6 +32,7 @@ if TYPE_CHECKING:
     from .tools import ToolRegistry
 
 from .extractor import MetadataExtractor
+from .attachments import Attachment, discover_attachments
 from .integrator import DataIntegrator
 from .parser import ISAParser
 from .plotter import ISAPlotter, PlotConfig
@@ -142,6 +143,7 @@ class ISAWrapper:
         self._semantic: SemanticNormalizer = semantic
         self._repair_log: RepairLog = repair_log
         self._source_path: Path = path
+        self._attachments = discover_attachments(repaired, data_root)
         self._tool_registry: ToolRegistry | None = None
 
         n_repairs = len(repair_log)
@@ -156,6 +158,18 @@ class ISAWrapper:
     def investigation(self) -> InvestigationModel:
         """The fully-extracted domain model (read-only)."""
         return self._investigation
+
+    def attachments(self, study: str | int | None = None, kind: Literal["image", "datasheet"] | None = None) -> list[Attachment]:
+        """List referenced images and datasheets, optionally filtered by study and kind.
+
+        Paths are resolved inside the dataset root (``data_root``); missing or
+        unsafe references remain visible with their status. In Jupyter, call
+        ``attachment.display()`` to preview supported images or PDF datasheets.
+        """
+        if kind not in (None, "image", "datasheet"):
+            raise ValueError("kind must be 'image', 'datasheet', or None.")
+        title = self.study(study).title if study is not None else None
+        return [item for item in self._attachments if (title is None or item.study == title) and (kind is None or item.kind == kind)]
 
     @property
     def repair_log(self) -> RepairLog:

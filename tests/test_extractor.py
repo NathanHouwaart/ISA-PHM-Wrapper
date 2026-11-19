@@ -41,6 +41,26 @@ class TestExtractInvestigation:
 
 
 class TestReferenceResolver:
+    def test_identical_definitions_and_bare_references_do_not_warn(self, caplog):
+        definition = {"@id": "#unit", "annotationValue": "G", "comments": []}
+        resolver = ReferenceResolver()
+        with caplog.at_level(logging.WARNING, logger="isa_phm"):
+            resolver.build([definition, {**definition}, {"@id": "#unit"}])
+        assert not caplog.records
+        assert resolver.resolve({"@id": "#unit"}) == definition
+
+    def test_conflicting_definitions_warn_once_and_bare_references_use_first(self, caplog):
+        first = {"@id": "#unit", "annotationValue": "G"}
+        other = {"@id": "#unit", "annotationValue": "g"}
+        resolver = ReferenceResolver()
+        with caplog.at_level(logging.WARNING, logger="isa_phm"):
+            resolver.build([first, dict(first), other, dict(other)])
+        assert len(caplog.records) == 1
+        assert "Conflicting definitions" in caplog.text
+        assert "#unit" in caplog.text
+        assert resolver.resolve({"@id": "#unit"}) == first
+        assert resolver.resolve(other) == other
+
     def test_resolves_nested_ontology_annotation_unit(self):
         source = {
             "unit": {"@id": "#unit"},

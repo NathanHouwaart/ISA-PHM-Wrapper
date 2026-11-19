@@ -24,6 +24,20 @@ from .errors import ExtractionError
 logger = logging.getLogger("isa_phm")
 
 
+def is_unavailable_raw_placeholder(data_file: dict) -> bool:
+    """Recognize the provisional empty-path raw-file availability marker."""
+    if str(data_file.get("type") or "").strip().lower() != "raw data file":
+        return False
+    if str(data_file.get("name") or "").strip() or str(data_file.get("filename") or "").strip():
+        return False
+    return any(
+        isinstance(comment, dict)
+        and str(comment.get("name") or "").strip().lower() == "availability"
+        and str(comment.get("value") or "").strip().lower() == "not included"
+        for comment in (data_file.get("comments") or [])
+    )
+
+
 # ---------------------------------------------------------------------------
 # Reference resolver
 # ---------------------------------------------------------------------------
@@ -64,12 +78,15 @@ class ReferenceResolver:
                 if id_str not in self._index:
                     self._index[id_str] = node
                 else:
-                    # Duplicate @id – keep first occurrence, warn once.
+                    # Repeated identical definitions are harmless. Conflicting
+                    # definitions remain ambiguous for bare references.
                     existing = self._index[id_str]
-                    if existing is not node:
+                    if existing != node and id_str not in self._warned_duplicates:
                         logger.warning(
-                            "Duplicate @id '%s' — keeping first occurrence.", id_str
+                            "Conflicting definitions for @id '%s' — bare references "
+                            "will use the first definition; review the dataset.", id_str
                         )
+                        self._warned_duplicates.add(id_str)
             for value in node.values():
                 self._walk(value)
         elif isinstance(node, list):

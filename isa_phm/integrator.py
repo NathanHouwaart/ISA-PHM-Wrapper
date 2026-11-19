@@ -23,8 +23,10 @@ import numpy as np
 import pandas as pd
 
 from .errors import AmbiguousRunError, DataFileError, RunNotFoundError
+from .capabilities import resolve_sampling_frequency
+from .factor_utils import resolve_factor_csv_value
 from .schemas import AssayModel, DataFile, DataLoadMetadata, RunRecord
-from .utils import compute_features
+from .utils import FEATURE_NAMES, compute_features
 
 logger = logging.getLogger("isa_phm")
 
@@ -146,6 +148,7 @@ class DataIntegrator:
             cached = self._cache.get(cache_key)
             if cached is not None:
                 logger.debug("Cache hit: %s", cache_key)
+                self._check_time(cached, run)
                 csv_config = cached.attrs.get("csv_config", {})
                 return cached, DataLoadMetadata(
                     assay_id=assay.assay_id,
@@ -162,7 +165,7 @@ class DataIntegrator:
                 )
 
             df, read_decision = self._read_csv(Path(data_file.path), return_decision=True)
-            self._normalize_time(df, run)
+            self._check_time(df, run)
             df.attrs["csv_config"] = {
                 "engine": read_decision.config.engine,
                 "sep": read_decision.config.sep,
@@ -199,36 +202,7 @@ class DataIntegrator:
         requested_file_type = self._validate_file_type(file_type)
 
         for run in assay.runs:
-            try:
-                data_file, resolved_file_type = self._resolve_data_file(
-                    assay_id=assay.assay_id,
-                    run=run,
-                    requested_file_type=requested_file_type,
-                )
-                cache_key = (study_id, assay.assay_id, run.run_id, resolved_file_type)
-                raw_values = self._load_values_for_features(
-                    path=Path(data_file.path),
-                    cache_key=cache_key,
-                )
-            except DataFileError as exc:
-                logger.warning(
-                    "Skipping run '%s' of assay '%s': %s",
-                    run.run_id,
-                    assay.assay_id,
-                    exc,
-                )
-                continue
-
-            values = raw_values.dropna().to_numpy(dtype=np.float64)
-            features = compute_features(values)
-            yield {
-                "run_id": run.run_id,
-                "run_number": run.run_number,
-                "study_id": study_id,
-                "assay_id": assay.assay_id,
-                **features,
-                **{f"fv_{k}": v for k, v in run.factor_values.items()},
-            }
+            yield self._compute_run_features(run, assay, study_id, requested_file_type)
 
     def _compute_run_features(
         self,
@@ -236,38 +210,47 @@ class DataIntegrator:
         assay: AssayModel,
         study_id: str,
         file_type: Literal["raw", "processed", "auto"],
-    ) -> dict | None:
-        """Helper for threaded lifecycle feature extraction."""
+    ) -> dict:
+        """Return a feature or explicit failure row for one measurement."""
+        row = {
+            "run_id": run.run_id,
+            "run_number": run.run_number,
+            "study_id": study_id,
+            "assay_id": assay.assay_id,
+            "requested_file_type": file_type,
+            "resolved_file_type": None,
+            "file_path": None,
+            "excluded_samples": None,
+            **{name: None for name in FEATURE_NAMES},
+            **{f"fv_{k}": resolve_factor_csv_value(v, self._data_root) for k, v in run.factor_values.items()},
+        }
         try:
             data_file, resolved_file_type = self._resolve_data_file(
                 assay_id=assay.assay_id,
                 run=run,
                 requested_file_type=self._validate_file_type(file_type),
             )
+            row.update(resolved_file_type=resolved_file_type, file_path=data_file.path)
             cache_key = (study_id, assay.assay_id, run.run_id, resolved_file_type)
             raw_values = self._load_values_for_features(
                 path=Path(data_file.path),
                 cache_key=cache_key,
             )
+            values = raw_values.to_numpy(dtype=np.float64)
+            finite = np.isfinite(values)
+            row["excluded_samples"] = int((~finite).sum())
+            if not finite.any():
+                raise DataFileError(f"Run '{run.run_id}' has no finite signal values to analyse.")
+            row.update(compute_features(values[finite]))
         except DataFileError as exc:
             logger.warning(
-                "Skipping run '%s' of assay '%s': %s",
+                "Could not calculate features for run '%s' of assay '%s': %s",
                 run.run_id,
                 assay.assay_id,
                 exc,
             )
-            return None
-
-        values = raw_values.dropna().to_numpy(dtype=np.float64)
-        features = compute_features(values)
-        return {
-            "run_id": run.run_id,
-            "run_number": run.run_number,
-            "study_id": study_id,
-            "assay_id": assay.assay_id,
-            **features,
-            **{f"fv_{k}": v for k, v in run.factor_values.items()},
-        }
+            return {**row, "status": "error", "error": str(exc)}
+        return {**row, "status": "ok", "error": None}
 
     def lifecycle_features_df(
         self,
@@ -305,8 +288,7 @@ class DataIntegrator:
                 }
                 for future in as_completed(futures):
                     result = future.result()
-                    if result is not None:
-                        rows_unordered.append(result)
+                    rows_unordered.append(result)
             rows = sorted(rows_unordered, key=lambda r: r["run_number"])
 
         if not rows:
@@ -410,37 +392,28 @@ class DataIntegrator:
         return data_file, resolved_file_type
 
     @staticmethod
-    def _normalize_time(df: pd.DataFrame, run: RunRecord) -> None:
-        """Scale/shift time column to seconds in-place when sampling freq is known."""
+    def _check_time(df: pd.DataFrame, run: RunRecord) -> None:
+        """Validate timestamps and warn about rate differences without changing data."""
         if "time" not in df.columns:
-            raise DataFileError("Cannot normalize time: DataFrame is missing 'time' column.")
+            raise DataFileError("Cannot check time: DataFrame is missing 'time' column.")
         if df.empty:
-            raise DataFileError("Cannot normalize time: DataFrame has no rows.")
+            raise DataFileError("Cannot check time: DataFrame has no rows.")
 
         t = df["time"]
         t_valid = t.dropna()
         if t_valid.empty:
-            raise DataFileError("Cannot normalize time: no valid time values found.")
+            raise DataFileError("Cannot check time: no valid time values found.")
 
-        fs: float | None = None
-        for pv in run.measurement_params:
-            if pv.unit and ("hz" in pv.unit.lower()):
-                try:
-                    val = float(str(pv.value).replace(",", "."))
-                    fs = val * 1000.0 if "khz" in pv.unit.lower() else val
-                    break
-                except (ValueError, TypeError):
-                    continue
-
-        t0 = float(t_valid.iloc[0])
-        if fs and fs > 0:
-            dt_raw = float(t.diff().dropna().abs().median())
-            if np.isfinite(dt_raw) and dt_raw > 0:
-                scale = (1.0 / fs) / dt_raw
-                df["time"] = (t - t0) * scale
-                return
-
-        df["time"] = t - t0
+        frequency = resolve_sampling_frequency(run.measurement_params)
+        if frequency.available and frequency.value is not None:
+            dt = float(t.diff().dropna().abs().median())
+            if np.isfinite(dt) and dt > 0 and not np.isclose(dt, 1.0 / frequency.value, rtol=0.01, atol=0):
+                logger.warning(
+                    "Run '%s': median timestamp spacing is %g, but sampling rate is %g Hz "
+                    "(expected spacing %g seconds). This differs if timestamps are in seconds; "
+                    "check their units, sampling metadata, and irregular sampling. Timestamps were preserved.",
+                    run.run_id, dt, frequency.value, 1.0 / frequency.value,
+                )
 
     @contextmanager
     def _cache_key_lock(self, cache_key: tuple):
@@ -564,7 +537,7 @@ class DataIntegrator:
                 )
                 warned_extra_cols = True
 
-            values = pd.to_numeric(chunk.iloc[:, 1], errors="coerce").dropna()
+            values = pd.to_numeric(chunk.iloc[:, 1], errors="coerce")
             if not values.empty:
                 arrays.append(values.to_numpy(dtype=np.float64))
 

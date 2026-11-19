@@ -22,7 +22,6 @@ from .semantic import SemanticNormalizer
 
 
 _FREQUENCY_UNITS = {"hz": 1.0, "khz": 1_000.0, "mhz": 1_000_000.0}
-_TIME_UNITS = {"min", "s", "ms", "sec", "second", "seconds", "hr", "hour", "hours"}
 
 
 def _normalise_unit(unit: str | None) -> str:
@@ -42,11 +41,15 @@ def resolve_sampling_frequency(params: Iterable[ParameterValue]) -> MetadataReso
     normalizer = SemanticNormalizer()
     matches: list[tuple[float, ParameterValue]] = []
     invalid_names: list[str] = []
+    statuses: set[str] = set()
     for parameter in params:
         semantic = normalizer.normalize_parameter(
             parameter.parameter_name, "measurement_parameter", parameter.unit
         )
         if semantic.semantic_key != "sampling_frequency" or semantic.status != "mapped":
+            continue
+        if isinstance(parameter.value, str) and parameter.value.strip().lower() in {"unknown", "not applicable"}:
+            statuses.add(parameter.value.strip().lower())
             continue
         multiplier = _FREQUENCY_UNITS.get(_normalise_unit(parameter.unit))
         value = _number(parameter.value)
@@ -55,6 +58,10 @@ def resolve_sampling_frequency(params: Iterable[ParameterValue]) -> MetadataReso
             continue
         matches.append((value * multiplier, parameter))
 
+    if statuses:
+        if matches or invalid_names or len(statuses) > 1:
+            return MetadataResolution(available=False, reason="Conflicting sampling-frequency values or statuses were provided.")
+        return MetadataResolution(available=False, reason=f"Sampling frequency is {next(iter(statuses))}.")
     if not matches:
         reason = (
             "Sampling frequency is not provided as a recognised measurement parameter."
@@ -82,14 +89,21 @@ def resolve_sampling_frequency(params: Iterable[ParameterValue]) -> MetadataReso
 def resolve_measured_unit(params: Iterable[ParameterValue]) -> MetadataResolution:
     """Resolve a declared measured unit without converting or standardising it."""
     candidates: list[tuple[str, ParameterValue]] = []
+    statuses: set[str] = set()
     for parameter in params:
-        name = parameter.parameter_name.lower()
-        unit = parameter.unit.strip() if parameter.unit else None
-        if "unit" in name and isinstance(parameter.value, str) and parameter.value.strip():
+        name = " ".join(parameter.parameter_name.casefold().split())
+        if name != "measured unit":
+            continue
+        if isinstance(parameter.value, str) and parameter.value.strip().lower() in {"unknown", "not applicable"}:
+            statuses.add(parameter.value.strip().lower())
+            continue
+        if isinstance(parameter.value, str) and parameter.value.strip():
             candidates.append((parameter.value.strip(), parameter))
-        elif unit and _normalise_unit(unit) not in set(_FREQUENCY_UNITS) | _TIME_UNITS:
-            candidates.append((unit, parameter))
 
+    if statuses:
+        if candidates or len(statuses) > 1:
+            return MetadataResolution(available=False, reason="Conflicting measured-unit values or statuses were provided.")
+        return MetadataResolution(available=False, reason=f"Measured unit is {next(iter(statuses))}.")
     if not candidates:
         return MetadataResolution(
             available=False,
@@ -176,12 +190,15 @@ def assay_analysis_capabilities(assay: AssayModel) -> AssayAnalysisCapabilities:
     frequency_domain = shared_capability("frequency_domain")
     if not sampling_frequency.available:
         frequency_domain = Capability(available=False, reason=sampling_frequency.reason)
+    physical_unit = shared_capability("physical_unit_interpretation")
+    if not measured_unit.available:
+        physical_unit = Capability(available=False, reason=measured_unit.reason)
     return AssayAnalysisCapabilities(
         assay_id=assay.assay_id,
         data_loading=shared_capability("data_loading"),
         time_domain_features=shared_capability("time_domain_features"),
         frequency_domain=frequency_domain,
-        physical_unit_interpretation=shared_capability("physical_unit_interpretation"),
+        physical_unit_interpretation=physical_unit,
         sampling_frequency=sampling_frequency,
         measured_unit=measured_unit,
         runs=runs,

@@ -24,7 +24,9 @@ pip install -e .
 The pinned ISA-PHM Specification submodule supplies the draft QUDT 3.5.2
 unit and quantity catalogues and experimental quantity–unit warning rules.
 Initialize submodules before installing from a source checkout or building a
-distribution. Built wheels include these pinned inputs and work offline.
+distribution. Built wheels include these pinned catalogue inputs. A fresh
+installation also needs the separately pinned validator and its dependencies;
+the default install fetches the validator from GitHub.
 The installed Specification validator checks the original export;
 the Wrapper's existing `validate_dataset()` checks its loaded analysis model.
 See [shared specification validation](#shared-specification-validation).

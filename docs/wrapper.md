@@ -126,7 +126,7 @@ ISAWrapper(
     path,                                   # str | Path -- ISA-JSON file
     data_root=None,                         # str | Path | None -- CSV root dir
     auto_fix=True,                          # apply 5 safe preprocessor repairs
-    strict_validation=True,                 # isatools schema check
+    strict_validation=True,                 # load through the ISA-tools model; not a schema check
     cache_maxsize=100,                      # DataFrames held in FIFO cache
     enable_chunked_large_file_mode=True,    # stream large CSV files
     large_file_threshold_mb=64.0,
@@ -196,7 +196,7 @@ Acquired via `wrapper.study(id)`.
 | `operating_conditions()` | `DataFrame` | Subset of `test_matrix()`: operating-condition factors only |
 | `fault_conditions()` | `DataFrame` | Subset of `test_matrix()`: fault/damage/RUL factors only |
 | `get_fault_labels(assay_id=)` | `DataFrame` | Fault factor values per (assay, run) pair |
-| `sensor_catalog()` | `DataFrame` | One row per assay with sensor metadata + inferred fs/unit |
+| `sensor_catalog()` | `DataFrame` | One row per assay with sensor metadata and explicitly resolved sampling rate/unit |
 | `semantic_factors()` | `list[SemanticField]` | Normalized semantic labels for this study's factors |
 
 ### Navigation

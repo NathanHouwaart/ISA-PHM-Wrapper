@@ -17,6 +17,32 @@ BACKEND = Path(__file__).resolve().parents[2] / "ISA-PHM-Backend"
 pytestmark = pytest.mark.skipif(not (BACKEND / "app" / "converter" / "entrypoint.py").exists(), reason="Backend checkout is unavailable")
 
 
+@pytest.mark.parametrize("description", ["High-pass filter at 100 Hz", "", "Unknown"])
+def test_selected_processing_description_survives_export_and_public_api(tmp_path, description):
+    pytest.importorskip("isatools")
+    sys.path.insert(0, str(BACKEND))
+    try:
+        from app.converter.entrypoint import create_isa_data
+        from isatools import isajson
+
+        payload = json.loads((BACKEND / "tests/fixtures/minimal_payload.json").read_text(encoding="utf-8-sig"))
+        setup = payload["studies"][0]["used_setup"]
+        setup["processingProtocols"][0]["description"] = description
+        setup["sensors"][0]["description"] = "Sensor description is not processing history"
+        output = json.loads(json.dumps(create_isa_data(payload), cls=isajson.ISAJSONEncoder))
+        protocols = output["studies"][0]["protocols"]
+        processing = next(p for p in protocols if p.get("protocolType", {}).get("annotationValue") == "Processing Protocol")
+        assert processing["description"] == description
+
+        path = tmp_path / "example.json"
+        path.write_text(json.dumps(output), encoding="utf-8")
+        assay = ISAWrapper(path).study(1).assay(1)
+        result = next(p for p in assay.list_protocols() if p.protocol_type == "Processing Protocol")
+        assert result.description == description
+    finally:
+        sys.path.remove(str(BACKEND))
+
+
 def test_processed_only_missing_raw_placeholder_roundtrips_and_loads(tmp_path):
     pytest.importorskip('isatools')
     sys.path.insert(0, str(BACKEND))

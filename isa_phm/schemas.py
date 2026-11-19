@@ -130,6 +130,7 @@ class ProtocolModel(BaseModel):
 
     id: str
     name: str
+    description: str = ""
     protocol_type: str  # annotationValue of protocolType
     parameters: list[ProtocolParameter] = Field(default_factory=list)
     sensor_id: str | None = None  # Extracted from protocol comments

@@ -303,6 +303,7 @@ class MetadataExtractor:
         return ProtocolModel(
             id=proto.get("@id", ""),
             name=proto.get("name", ""),
+            description=proto.get("description") or "",
             protocol_type=proto_type,
             parameters=parameters,
             sensor_id=sensor_id,

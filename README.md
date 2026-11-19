@@ -25,6 +25,9 @@ The pinned ISA-PHM Specification submodule supplies the draft QUDT 3.5.2
 unit and quantity catalogues and experimental quantity–unit warning rules.
 Initialize submodules before installing from a source checkout or building a
 distribution. Built wheels include these pinned inputs and work offline.
+The installed Specification validator checks the original export;
+the Wrapper's existing `validate_dataset()` checks its loaded analysis model.
+See [shared specification validation](#shared-specification-validation).
 
 ```python
 from isa_phm import lookup_unit, lookup_quantity
@@ -60,7 +63,35 @@ pip install -e ".[docs]"       # MkDocs
 pip install -e ".[agent]"      # FastAPI + OpenAI agent server
 ```
 
+## Shared specification validation
+
+Installing the Wrapper also installs the shared draft validator from the
+Specification revision pinned in `pyproject.toml`; Git and network access are
+needed for this initial installation. Its ISA dependencies are pinned as well.
+Then inspect an exported dataset:
+
+```python
+wrapper = ISAWrapper("path/to/dataset.isa-phm.json")
+report = wrapper.validate_specification()
+print(report["status"], report["checks"], report["not_selected"])
+```
+
+The report distinguishes errors, incomplete checks and advisory warnings. It
+checks the original JSON and selected dataset paths, not the Wrapper's repaired
+in-memory model. Pass `checks=(...)` to select checks explicitly, for example
+`("layout", "phm_sensor_csv")` for the potentially slow CSV checks. A pass
+applies only to selected draft checks; it is not an ISA-PHM compliance claim.
+The existing `wrapper.validate_dataset()` remains a separate Wrapper report.
+The validator dependency and catalogue submodule point to the same draft
+Specification commit. Update both together when adopting a new revision.
+
 ## Quick Start
+
+`strict_validation` defaults to `True` and asks ISA-tools to load the JSON
+into its model. Despite the name, this is not the separate ISA core JSON
+Schema check or ISA-PHM conformance validation. `False` skips that ISA-tools
+loading step but retains basic JSON and top-level checks; use it for inspection
+only with that limitation in mind.
 
 ```python
 from isa_phm import ISAWrapper
@@ -141,6 +172,10 @@ explicit `fs=` in Hz. A waterfall using multiple measurements requires a shared
 rate unless `fs=` is explicitly provided. For processed data, verify that the
 measurement-protocol sampling rate still applies: the wrapper cannot establish
 whether processing resampled the signal. Pass the correct `fs=` when known.
+
+Use `assay.list_protocols()` to inspect recorded measurement and processing
+protocols, including their descriptions. An empty description means no
+description was recorded; it does not establish how data was processed.
 
 For a focused table, choose the features explicitly:
 

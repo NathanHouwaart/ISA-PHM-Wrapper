@@ -9,7 +9,9 @@ dependencies = [
     "numpy>=1.24,<3.0",
     "scipy>=1.10,<2.0",
     "bokeh>=3.0,<4.0",
-    "isatools>=0.14,<0.15",
+    "isatools==0.14.3",
+    "jsonschema==4.23.0",
+    "isa-phm-validator @ git+https://github.com/NathanHouwaart/ISA-PHM-Specification.git@05c98b3e4666fed744cc40cc6d46c4da0db3a03e",
 ]
 
 [project.optional-dependencies]

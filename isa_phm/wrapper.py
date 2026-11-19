@@ -142,7 +142,8 @@ class ISAWrapper:
         self._navigator: QueryNavigator = navigator
         self._semantic: SemanticNormalizer = semantic
         self._repair_log: RepairLog = repair_log
-        self._source_path: Path = path
+        self._source_path: Path = path.resolve()
+        self._dataset_root: Path = data_root.resolve()
         self._attachments = discover_attachments(repaired, data_root)
         self._tool_registry: ToolRegistry | None = None
 
@@ -570,6 +571,32 @@ class ISAWrapper:
             payload["validation_report"] = self.validate_dataset().model_dump()
 
         return payload
+
+    def validate_specification(
+        self,
+        *,
+        checks: tuple[str, ...] = (
+            "layout", "isa_schema", "phm_protocols", "phm_metadata",
+            "phm_experiment_type", "phm_sensors",
+        ),
+    ) -> dict[str, Any]:
+        """Run selected draft Specification checks on the original exported file.
+
+        Results identify incomplete checks and are not an ISA-PHM conformance claim.
+        CSV streaming and the experimental ISA-tools check are opt-in via checks.
+        """
+        try:
+            from validator import validate_dataset as validate_export
+        except ModuleNotFoundError as exc:
+            if exc.name != "validator":
+                raise
+            raise RuntimeError(
+                "The shared ISA-PHM validator is not installed. Reinstall the "
+                "Wrapper with its dependencies: python -m pip install -e ."
+            ) from exc
+        return validate_export(
+            self._source_path, dataset_root=self._dataset_root, checks=checks
+        ).to_dict()
 
     def validate_dataset(
         self,

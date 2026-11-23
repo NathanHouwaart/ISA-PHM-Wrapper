@@ -11,7 +11,7 @@ dependencies = [
     "bokeh>=3.0,<4.0",
     "isatools==0.14.3",
     "jsonschema==4.23.0",
-    "isa-phm-validator @ git+https://github.com/NathanHouwaart/ISA-PHM-Specification.git@ff98fb8091af5e76d3d30cf32cdcc0995f7ff4ca",
+    "isa-phm-validator @ git+https://github.com/NathanHouwaart/ISA-PHM-Specification.git@5afa9336c299f1face1e73a50f0882ea5ff936e5",
 ]
 
 [project.optional-dependencies]

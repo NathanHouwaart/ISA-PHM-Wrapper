@@ -108,8 +108,9 @@ def discover_attachments(document: dict, root: Path) -> list[Attachment]:
                         add_comments(characteristic, {"datasheet": "datasheet"}, title, "characteristic", f"{owner} / {category_name}")
         for assay in study.get("assays", []) or []:
             if isinstance(assay, dict):
-                alias = next((c.get("value") for c in assay.get("comments", []) or [] if isinstance(c, dict) and str(c.get("name", "")).strip().casefold() == "sensor alias" and c.get("value")), None)
+                comments = assay.get("comments", []) or []
+                alias = next((c.get("value") for name in ("sensor_alias", "sensor alias") for c in comments if isinstance(c, dict) and str(c.get("name", "")).strip().casefold() == name and c.get("value")), None)
                 owner = str(alias or assay.get("filename") or assay.get("@id") or "assay")
                 add_comments(assay, {"datasheet": "datasheet"}, title, "sensor", owner)
-                add_comments(assay, {"physical device datasheet": "datasheet"}, title, "physical device", owner)
+                add_comments(assay, {"physical_device_datasheet": "datasheet", "physical device datasheet": "datasheet"}, title, "physical device", owner)
     return result

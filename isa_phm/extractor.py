@@ -225,7 +225,11 @@ class MetadataExtractor:
 
             raw_value = fv.get("value")
             unit_str = resolver.get_unit_str(fv.get("unit"))
-            if unit_str:
+            # Keep CSV paths machine-readable. The unit is available on the
+            # study's FactorModel; appending it makes the path unresolvable.
+            if isinstance(raw_value, str) and raw_value.strip().lower().endswith('.csv'):
+                result[factor_name] = raw_value
+            elif unit_str:
                 result[factor_name] = f"{raw_value} {unit_str}"
             else:
                 result[factor_name] = raw_value
@@ -287,10 +291,8 @@ class MetadataExtractor:
         proto_type = proto_type_obj.get("annotationValue", "")
 
         # Sensor ID may be stored in protocol comments.
-        sensor_id: str | None = None
-        for comment in proto.get("comments", []):
-            if comment.get("name") == "Sensor id":
-                sensor_id = comment.get("value") or None
+        comments = {comment.get("name"): comment.get("value") for comment in proto.get("comments", [])}
+        sensor_id: str | None = comments.get("sensor_id") or comments.get("Sensor id") or None
 
         # Extract parameter definitions.
         parameters: list[ProtocolParameter] = []
@@ -374,15 +376,12 @@ class MetadataExtractor:
         # Sensor identity.
         sensor_id = meas_protocol.sensor_id if meas_protocol else None
 
-        # Prefer the "sensor alias" comment on the assay over the filename-based ID.
+        # Prefer the canonical comment, accepting the name used in older exports.
         sensor_alias = assay_id
         assay_comments = {str(comment.get("name", "")).lower().strip(): comment.get("value") for comment in assay.get("comments", [])}
-        for comment in assay.get("comments", []):
-            if comment.get("name", "").lower().strip() == "sensor alias":
-                value = comment.get("value", "").strip()
-                if value:
-                    sensor_alias = value
-                    break
+        value = assay_comments.get("sensor_alias") or assay_comments.get("sensor alias")
+        if isinstance(value, str) and value.strip():
+            sensor_alias = value.strip()
 
         sensor = SensorInfo(
             sensor_id=sensor_id,
@@ -392,11 +391,11 @@ class MetadataExtractor:
             measurement_type=measurement_type,
             quantity_kind_identifier=quantity_kind_identifier,
             sensor_datasheet=assay_comments.get("datasheet") or None,
-            physical_device_id=assay_comments.get("physical device id") or None,
-            physical_device_name=assay_comments.get("physical device name") or None,
-            physical_device_model=assay_comments.get("physical device model") or None,
-            physical_device_serial_number=assay_comments.get("physical device serial number") or None,
-            physical_device_datasheet=assay_comments.get("physical device datasheet") or None,
+            physical_device_id=assay_comments.get("physical_device_id") or assay_comments.get("physical device id") or None,
+            physical_device_name=assay_comments.get("physical_device_name") or assay_comments.get("physical device name") or None,
+            physical_device_model=assay_comments.get("physical_device_model") or assay_comments.get("physical device model") or None,
+            physical_device_serial_number=assay_comments.get("physical_device_serial_number") or assay_comments.get("physical device serial number") or None,
+            physical_device_datasheet=assay_comments.get("physical_device_datasheet") or assay_comments.get("physical device datasheet") or None,
         )
 
         # Build parameter definition lookup (id → name) for this assay.

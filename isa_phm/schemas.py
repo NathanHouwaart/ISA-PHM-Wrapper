@@ -465,41 +465,6 @@ class DataLoadMetadata(BaseModel):
 
 
 # ---------------------------------------------------------------------------
-# Semantic normalization models
-# ---------------------------------------------------------------------------
-
-
-class SemanticField(BaseModel):
-    source_name: str
-    source_kind: Literal["factor", "measurement_parameter", "processing_parameter"]
-    semantic_key: str
-    status: Literal["mapped", "unknown", "ambiguous"]
-    confidence: float
-    provenance: str
-    candidates: list[str] = Field(default_factory=list)
-    context: dict[str, Any] = Field(default_factory=dict)
-
-
-class SemanticDiagnostics(BaseModel):
-    total_fields: int = 0
-    mapped_fields: int = 0
-    unknown_fields: int = 0
-    ambiguous_fields: int = 0
-    unknown_ratio: float = 0.0
-    ambiguous_ratio: float = 0.0
-    missing_override_fields: list[str] = Field(default_factory=list)
-    strict_violations: list[str] = Field(default_factory=list)
-
-
-class SemanticManifest(BaseModel):
-    investigation_id: str
-    study_factors: dict[str, list[SemanticField]] = Field(default_factory=dict)
-    assay_measurement_params: dict[str, list[SemanticField]] = Field(default_factory=dict)
-    assay_processing_params: dict[str, list[SemanticField]] = Field(default_factory=dict)
-    diagnostics: SemanticDiagnostics = Field(default_factory=SemanticDiagnostics)
-
-
-# ---------------------------------------------------------------------------
 # Dataset validation report models
 # ---------------------------------------------------------------------------
 

@@ -148,43 +148,6 @@ class TestISAWrapperSummaries:
         assert list(out.keys()) == ["Test Study B"]
 
 
-class TestSemanticStrictMode:
-    def test_semantic_strict_raises_when_unknown_ratio_exceeds_threshold(
-        self,
-        minimal_semantic_isa_file,
-        tmp_path,
-    ):
-        wrapper = ISAWrapper(
-            minimal_semantic_isa_file,
-            data_root=tmp_path,
-            strict_validation=False,
-        )
-
-        with pytest.raises(ValidationError, match="SEM_UNKNOWN_RATIO_EXCEEDED"):
-            wrapper.semantic_manifest(
-                strict=True,
-                max_unknown_ratio=0.0,
-                max_ambiguous_ratio=0.0,
-            )
-
-    def test_semantic_diagnostics_include_ratios_and_missing_override_fields(
-        self,
-        minimal_semantic_isa_file,
-        tmp_path,
-    ):
-        wrapper = ISAWrapper(
-            minimal_semantic_isa_file,
-            data_root=tmp_path,
-            strict_validation=False,
-        )
-        manifest = wrapper.semantic_manifest()
-        diag = manifest.diagnostics
-        assert 0.0 <= diag.unknown_ratio <= 1.0
-        assert 0.0 <= diag.ambiguous_ratio <= 1.0
-        assert isinstance(diag.missing_override_fields, list)
-        assert "Mystery Knob" in diag.missing_override_fields
-
-
 class TestPublicationContactLinking:
     def test_publication_authors_resolve_to_contact_names_and_emails(
         self, minimal_publication_isa_file, tmp_path
@@ -211,7 +174,7 @@ class TestAIContextExport:
             data_root=tmp_path,
             strict_validation=False,
         )
-        payload = wrapper.ai_context(include_semantics=True, include_validation=True)
+        payload = wrapper.ai_context(include_validation=True)
 
         assert list(payload.keys()) == [
             "schema_version",
@@ -223,7 +186,6 @@ class TestAIContextExport:
             "studies",
             "assays",
             "factors",
-            "semantic_manifest",
             "validation_report",
         ]
         assert payload["schema_version"] == "isa_phm.ai_context.v1"
@@ -232,7 +194,6 @@ class TestAIContextExport:
         assert isinstance(payload["studies"], list)
         assert isinstance(payload["assays"], list)
         assert isinstance(payload["factors"], list)
-        assert isinstance(payload["semantic_manifest"], dict)
         assert isinstance(payload["validation_report"], dict)
 
         # Must be JSON-safe and deterministic in structure.
@@ -246,7 +207,7 @@ class TestAIContextExport:
             data_root=tmp_path,
             strict_validation=False,
         )
-        payload = wrapper.ai_context(include_semantics=False, include_validation=False)
+        payload = wrapper.ai_context(include_validation=False)
         assert "semantic_manifest" not in payload
         assert "validation_report" not in payload
 
@@ -258,7 +219,7 @@ class TestAIContextExport:
             data_root=tmp_path,
             strict_validation=False,
         )
-        payload = wrapper.ai_context(include_semantics=True, include_validation=True)
+        payload = wrapper.ai_context(include_validation=True)
         payload["generated_at_utc"] = "<GENERATED_AT_UTC>"
         payload["source_path"] = "<SOURCE_PATH>"
 
@@ -297,23 +258,6 @@ class TestValidateDataset:
         report = wrapper.validate_dataset(check_files=True)
         codes = {issue.code for issue in report.issues}
         assert "FILE_NOT_FOUND" in codes
-
-    def test_validate_dataset_semantic_strict_emits_error_codes(
-        self, minimal_semantic_isa_file, tmp_path
-    ):
-        wrapper = ISAWrapper(
-            minimal_semantic_isa_file,
-            data_root=tmp_path,
-            strict_validation=False,
-        )
-        report = wrapper.validate_dataset(
-            semantic_strict=True,
-            max_unknown_ratio=0.0,
-            max_ambiguous_ratio=0.0,
-        )
-        assert report.ok is False
-        codes = {issue.code for issue in report.issues}
-        assert "SEM_UNKNOWN_RATIO_EXCEEDED" in codes
 
     def test_validate_dataset_deduplicates_repeated_file_not_found(
         self, minimal_multi_run_isa_file, tmp_csv_dir

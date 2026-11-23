@@ -41,12 +41,12 @@ print(wrapper.list_tools())
 
 validation = wrapper.call_tool(
     "validate_dataset",
-    {"check_files": True, "semantic_strict": False},
+    {"check_files": True},
 )
 
 context = wrapper.call_tool(
     "ai_context",
-    {"include_semantics": True, "include_validation": False},
+    {"include_validation": False},
 )
 
 run_payload = wrapper.call_tool(

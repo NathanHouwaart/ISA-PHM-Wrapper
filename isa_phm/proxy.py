@@ -51,8 +51,6 @@ from .schemas import (
     RunOverview,
     RunRecord,
     RunSummary,
-    SemanticField,
-    SemanticManifest,
     StudyModel,
     StudyOverview,
     StudySummary,
@@ -61,7 +59,6 @@ from .schemas import (
 if TYPE_CHECKING:
     from .integrator import DataIntegrator
     from .plotter import ISAPlotter
-    from .semantic import SemanticNormalizer
 
 logger = logging.getLogger("isa_phm")
 _FAULT_TYPE_RE = re.compile(r"\b(fault|damage|rul|defect|degradation)\b", re.IGNORECASE)
@@ -112,14 +109,11 @@ class QueryNavigator:
         investigation: InvestigationModel,
         integrator: "DataIntegrator",
         plotter: "ISAPlotter",
-        semantic: "SemanticNormalizer | None" = None,
     ) -> None:
-        from .semantic import SemanticNormalizer
 
         self._inv = investigation
         self._integrator = integrator
         self._plotter = plotter
-        self._semantic = semantic or SemanticNormalizer()
 
         # Build lookup indices.
         self._by_uuid: dict[str, StudyModel] = {}
@@ -179,30 +173,32 @@ class QueryNavigator:
         ------
         StudyNotFoundError
         """
+        studies = self._inv.studies
+        def study_choices() -> str:
+            available = "\n".join(f"  {index}. {study.title}" for index, study in enumerate(studies, 1))
+            return f"Available studies:\n{available}" if available else "No studies are available."
         # Integer index (1-based).
         if isinstance(study_id, int):
-            studies = self._inv.studies
             if not (1 <= study_id <= len(studies)):
                 raise StudyNotFoundError(
                     f"Study index {study_id} out of range. "
-                    f"Valid range: 1–{len(studies)}."
+                    f"Valid range: 1–{len(studies)}.\n{study_choices()}"
                 )
-            return StudyProxy(studies[study_id - 1], self._inv, self._integrator, self._plotter, self._semantic)
+            return StudyProxy(studies[study_id - 1], self._inv, self._integrator, self._plotter)
 
         # Exact UUID match.
         s = self._by_uuid.get(study_id)
         if s:
-            return StudyProxy(s, self._inv, self._integrator, self._plotter, self._semantic)
+            return StudyProxy(s, self._inv, self._integrator, self._plotter)
 
         # Case-insensitive title match.
         s = self._by_title_lower.get(study_id.strip().lower())
         if s:
-            return StudyProxy(s, self._inv, self._integrator, self._plotter, self._semantic)
+            return StudyProxy(s, self._inv, self._integrator, self._plotter)
 
-        available = sorted(self._by_title_lower.keys())
         raise StudyNotFoundError(
             f"Study '{study_id}' not found in investigation '{self._inv.title}'. "
-            f"Available study titles: {available}"
+            f"{study_choices()}"
         )
 
     def compare_studies(
@@ -271,13 +267,11 @@ class StudyProxy:
         investigation: InvestigationModel,
         integrator: "DataIntegrator",
         plotter: "ISAPlotter",
-        semantic: "SemanticNormalizer",
     ) -> None:
         self._study = study
         self._inv = investigation
         self._integrator = integrator
         self._plotter = plotter
-        self._semantic = semantic
 
         # Assay lookup by filename (assay_id).
         self._assay_by_id: dict[str, AssayModel] = {
@@ -294,7 +288,6 @@ class StudyProxy:
                 self._inv,
                 self._integrator,
                 self._plotter,
-                self._semantic,
             )
             self._assay_proxy_cache[assay_model.assay_id] = proxy
         return proxy
@@ -386,10 +379,6 @@ class StudyProxy:
     def list_factors(self) -> list[FactorSummary]:
         """Return the factors defined for this study."""
         return self.overview().factors
-
-    def semantic_factors(self) -> list[SemanticField]:
-        """Return normalized semantic labels for this study's factors."""
-        return self._semantic.normalize_study_factors(self._study)
 
     def variable_overview(self) -> list[pd.DataFrame]:
         """
@@ -909,42 +898,54 @@ class StudyProxy:
 
     def assay(self, assay_id: str | int) -> "AssayProxy":
         """
-        Navigate into a specific assay by 1-based integer index, filename, or assay_id.
+        Navigate into an assay by 1-based index, assay ID, or sensor name.
 
         Parameters
         ----------
         assay_id : str | int
-            1-based integer index, assay_id string (e.g. ``"a_st01_se01"``),
-            or a case-insensitive partial match.
+            1-based index, assay ID (e.g. ``"se01"``), or sensor name. Names
+            are case-insensitive and must identify one sensor in the study.
 
         Raises
         ------
         AssayNotFoundError
         """
+        assays = self._study.assays
+        def assay_choices() -> str:
+            entries = "\n".join(
+                f"  {index}. {item.sensor.alias or 'Unnamed sensor'} (assay ID: {item.assay_id})"
+                for index, item in enumerate(assays, 1)
+            )
+            return f"Available sensors:\n{entries}" if entries else "No sensors are available in this study."
+
         # Integer index (1-based).
-        if isinstance(assay_id, int):
-            assays = self._study.assays
+        if isinstance(assay_id, int) and not isinstance(assay_id, bool):
             if not (1 <= assay_id <= len(assays)):
+                valid_range = f"Valid range: 1–{len(assays)}.\n" if assays else ""
                 raise AssayNotFoundError(
                     f"Assay index {assay_id} out of range for study "
-                    f"'{self._study.title}'. Valid range: 1–{len(assays)}."
+                    f"'{self._study.title}'. {valid_range}{assay_choices()}"
                 )
             return self._assay_proxy(assays[assay_id - 1])
 
+        if not isinstance(assay_id, str) or not assay_id.strip():
+            raise AssayNotFoundError(f"Select a sensor by its name, assay ID, or 1-based index.\n{assay_choices()}")
         a = self._assay_by_id.get(assay_id)
         if a is None:
-            # Try partial / case-insensitive match.
-            lower = assay_id.strip().lower()
-            for key, val in self._assay_by_id.items():
-                if key.lower() == lower or key.lower().endswith(lower):
-                    a = val
-                    break
+            key = assay_id.strip().casefold()
+            matches = [item for item in self._study.assays
+                       if item.assay_id.casefold() == key or item.sensor.alias.strip().casefold() == key]
+            if not matches:
+                matches = [item for item in self._study.assays if item.assay_id.casefold().endswith(key)]
+            if len(matches) > 1:
+                choices = [f"{item.sensor.alias} ({item.assay_id})" for item in matches]
+                raise AssayNotFoundError(f"Sensor {assay_id!r} is ambiguous in study {self._study.title!r}. Use an assay ID: {choices}")
+            a = matches[0] if matches else None
 
         if a is None:
-            available = sorted(self._assay_by_id.keys())
             raise AssayNotFoundError(
                 f"Assay '{assay_id}' not found in study '{self._study.title}'. "
-                f"Available assay IDs: {available}"
+                f"{assay_choices()}"
             )
         return self._assay_proxy(a)
 
@@ -1033,6 +1034,50 @@ class StudyProxy:
                 lc = sp.assay(aid).lifecycle_features(file_type=file_type, n_workers=n_workers)
                 out[sp.title] = lc
         return out
+
+    def plot_sensor_features(
+        self,
+        feature: str = "rms",
+        assay_ids: list[str | int] | None = None,
+        file_type: Literal["raw", "processed", "auto"] = "auto",
+        n_workers: int | None = None,
+    ) -> object:
+        """Plot a feature across runs for selected sensors (all sensors by default).
+
+        Dimensional features require matching, explicitly recorded units for every
+        selected run. Failed feature calculations raise rather than being hidden.
+        """
+        from .utils import FEATURE_NAMES
+
+        if feature not in FEATURE_NAMES:
+            raise ValueError(f"Unknown feature {feature!r}. Available: {list(FEATURE_NAMES)}")
+        selected = [self.assay(item) for item in assay_ids] if assay_ids is not None else [self.assay(item.assay_id) for item in self.list_assays()]
+        if not selected:
+            raise PlotError("No sensors selected for the feature plot.")
+        for sensor in selected:
+            if not sensor._assay.runs:
+                raise PlotError(f"Sensor {sensor.assay_id!r} has no recorded runs.")
+        units: set[str] = set()
+        if feature in {"rms", "mean", "max", "peak2peak", "std"}:
+            for sensor in selected:
+                for measurement in sensor._assay.runs:
+                    unit = resolve_measured_unit(measurement.measurement_params)
+                    if not unit.available:
+                        raise PlotError(f"Measured unit unavailable for {sensor.assay_id} / {measurement.run_id}: {unit.reason}")
+                    units.add(str(unit.value))
+            if len(units) != 1:
+                raise PlotError("Selected measurements have different or unavailable measured units.")
+        group = AssayGroup([sensor.assay_id for sensor in selected], name="Selected sensors")
+        curves = self.lifecycle_features(group, file_type=file_type, n_workers=n_workers)
+        failures = [(label, row.run_id, row.error) for label, frame in curves.items()
+                    for row in frame.itertuples(index=False) if row.status != "ok"]
+        if failures:
+            raise DataFileError(f"Feature calculation failed for {len(failures)} measurement(s): {failures[:5]}")
+        unit_label = f" ({next(iter(units))})" if units else ""
+        return self._plotter.plot_multi_lifecycle(
+            curves, feature=feature, title=f"{feature.upper()} by sensor | {self.title}",
+            xlabel="Run / window number", ylabel=f"{feature.upper()}{unit_label}",
+        )
 
     def plot_sensor_lifecycle_correlation(
         self,
@@ -1357,14 +1402,12 @@ class AssayProxy:
         investigation: InvestigationModel,
         integrator: "DataIntegrator",
         plotter: "ISAPlotter",
-        semantic: "SemanticNormalizer",
     ) -> None:
         self._assay = assay
         self._study = study
         self._inv = investigation
         self._integrator = integrator
         self._plotter = plotter
-        self._semantic = semantic
 
     # ------------------------------------------------------------------
     # Informational
@@ -1462,14 +1505,6 @@ class AssayProxy:
             for pv in run.processing_params
         ]
         return pd.DataFrame(rows, columns=["parameter_name", "value", "unit"])
-
-    def semantic_parameters(
-        self,
-        run_id: str | None = None,
-    ) -> dict[str, list[SemanticField]]:
-        """Return normalized semantic labels for measurement/processing parameters."""
-        run = self._first_or_run(run_id)
-        return self._semantic.normalize_assay_parameters(self._assay, run=run)
 
     def columns(self) -> list[str]:
         """Return the standard DataFrame column names produced by load_dataframe()."""
@@ -1710,20 +1745,33 @@ class AssayProxy:
     # Navigation into runs
     # ------------------------------------------------------------------
 
-    def run(self, run_id: str) -> "RunProxy":
+    def run(self, run_id: str | int) -> "RunProxy":
         """
-        Navigate into a specific run.
+        Navigate by recorded run number (1-based) or run ID string.
 
         Raises
         ------
         RunNotFoundError
         """
-        record = self._assay.get_run(run_id)
+        def run_choices() -> str:
+            entries = "\n".join(f"  {run.run_number}. {run.run_id}" for run in self._assay.runs)
+            if not entries:
+                return "No runs are available for this sensor."
+            numbers = [run.run_number for run in self._assay.runs]
+            valid_range = f"Valid range: 1–{len(numbers)}.\n" if sorted(numbers) == list(range(1, len(numbers) + 1)) else ""
+            return f"{valid_range}Available runs (number and ID):\n{entries}"
+
+        if isinstance(run_id, int) and not isinstance(run_id, bool):
+            matches = [run for run in self._assay.runs if run.run_number == run_id]
+            if len(matches) > 1:
+                raise AmbiguousRunError(f"Run number {run_id} occurs more than once; select a run by its ID.\n{run_choices()}")
+            record = matches[0] if matches else None
+        else:
+            record = self._assay.get_run(run_id) if isinstance(run_id, str) else None
         if record is None:
-            available = [r.run_id for r in self._assay.runs]
             raise RunNotFoundError(
-                f"run_id '{run_id}' not found in assay '{self._assay.assay_id}'. "
-                f"Available: {available}"
+                f"Run '{run_id}' not found in assay '{self._assay.assay_id}'. "
+                f"{run_choices()}"
             )
         return RunProxy(record, self._assay, self._study, self._inv, self._integrator, self._plotter)
 
@@ -2562,7 +2610,8 @@ class RunProxy:
         Returns
         -------
         pd.DataFrame
-            Full CSV contents (no header assumed).
+            Full CSV contents. A text header is recognised when the next row is numeric;
+            otherwise columns are numbered.
 
         Raises
         ------
@@ -2583,6 +2632,103 @@ class RunProxy:
                 "data_root is not set on the integrator — cannot resolve factor CSV path."
             )
         return load_factor_csv_dataframe(raw_value, data_root)
+
+    def plot_operating_conditions(self, factor_names: list[str] | None = None) -> object:
+        """Plot CSV-backed operating conditions for this run on separate axes.
+
+        Select conditions by name, or omit the argument to use every recorded
+        operating condition. Missing or invalid files raise a descriptive error.
+        PLC timestamps are displayed as recorded; no synchronization is assumed.
+        """
+        from bokeh.layouts import gridplot
+
+        return gridplot(self._operating_condition_panels(factor_names), ncols=2)
+
+    def _operating_condition_panels(self, factor_names: list[str] | None = None) -> list:
+        """Build the individual condition panels used by both run-level plots."""
+        from bokeh.plotting import figure
+
+        factors = [factor for factor in self._study.factors if factor.factor_type.casefold() == "operating condition"]
+        by_name = {factor.factor_name: factor for factor in factors}
+        names = factor_names if factor_names is not None else list(by_name)
+        if not names:
+            raise PlotError("No operating conditions selected for this study.")
+        plots = []
+        for name in names:
+            if name not in by_name:
+                raise ValueError(f"Unknown operating condition {name!r}. Available: {list(by_name)}")
+            try:
+                frame = self.load_factor_timeseries(name)
+            except (ValueError, OSError) as exc:
+                raise DataFileError(f"Cannot load operating condition {name!r} for {self.run_id}: {exc}") from exc
+            if frame.shape[1] < 2:
+                raise DataFileError(f"Operating condition {name!r} needs a time and value column.")
+            time_col, value_col = frame.columns[:2]
+            unit = by_name[name].unit
+            plot = figure(title=name, x_axis_label=str(time_col),
+                          y_axis_label=f"{name} ({unit})" if unit else name,
+                          width=450, height=270, tools="pan,wheel_zoom,box_zoom,reset,save")
+            plot.line(frame[time_col].to_numpy(), frame[value_col].to_numpy(), line_width=2)
+            plots.append(plot)
+        return plots
+
+    def plot_with_operating_conditions(
+        self,
+        factor_names: list[str] | None = None,
+        file_type: Literal["raw", "processed", "auto"] = "auto",
+        max_points: int = 20_000,
+        alignment: Literal["recorded", "first_sample"] = "recorded",
+    ) -> object:
+        """Show this sensor and its operating conditions on linked time axes.
+
+        ``recorded`` displays timestamps as stored. ``first_sample`` sets the
+        first sensor sample and earliest selected condition sample to zero for
+        display, preserving the offsets between conditions. It assumes overlap;
+        it does not establish synchronization. Files are never modified and no
+        interpolation or resampling is performed. Display thinning may omit peaks.
+        """
+        from bokeh.layouts import column, gridplot
+        from bokeh.models import Div
+
+        if not isinstance(max_points, int) or isinstance(max_points, bool) or max_points < 1:
+            raise ValueError("max_points must be a positive integer.")
+        if alignment not in {"recorded", "first_sample"}:
+            raise ValueError("alignment must be 'recorded' or 'first_sample'.")
+        signal = self.plot_timeseries(file_type=file_type, max_points=max_points,
+                                     title=f"{self._assay.sensor.alias} | {self.run_id}",
+                                     xlabel="Recorded time", width=900, height=300)
+        conditions = self._operating_condition_panels(factor_names)
+        if alignment == "first_sample":
+            def first_time(source, key):
+                values = source.data[key]
+                try:
+                    value = float(values[0])
+                except (IndexError, TypeError, ValueError) as exc:
+                    raise DataFileError("Cannot align a series without a numeric first timestamp.") from exc
+                if not math.isfinite(value):
+                    raise DataFileError("Cannot align a series with a non-finite first timestamp.")
+                return value
+
+            sensor_source = signal.renderers[0].data_source
+            sensor_origin = first_time(sensor_source, "t")
+            condition_sources = [panel.renderers[0].data_source for panel in conditions]
+            condition_origin = min(first_time(source, "x") for source in condition_sources)
+            sensor_source.data = {**sensor_source.data, "t": [float(t) - sensor_origin for t in sensor_source.data["t"]]}
+            for source in condition_sources:
+                source.data = {**source.data, "x": [float(t) - condition_origin for t in source.data["x"]]}
+            axis_label = "Time since first sample (approximate overlap)"
+            notice_text = "<b>Approximate overlap:</b> the first sensor sample and earliest condition sample are placed at zero for display. Actual synchronization is unknown; brief sensor peaks may be omitted by display thinning."
+        else:
+            axis_label = "Recorded time (origins may differ)"
+            notice_text = "<b>Recorded timestamps:</b> time origins may differ and alignment is not verified. Sensor data is thinned for display and may omit brief peaks."
+        signal.xaxis.axis_label = axis_label
+        for panel in conditions:
+            panel.x_range = signal.x_range
+            panel.width = 900
+            panel.height = 210
+            panel.xaxis.axis_label = axis_label
+        notice = Div(text=notice_text, width=900)
+        return column(notice, gridplot([signal, *conditions], ncols=1))
 
     def load_dataframe(self, file_type: Literal["raw", "processed", "auto"] = "processed") -> pd.DataFrame:
         """Load this run's data file into a DataFrame."""

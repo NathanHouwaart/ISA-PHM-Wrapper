@@ -133,7 +133,6 @@ ISAWrapper(
     chunk_rows=250_000,
     csv_bad_lines="error",                  # "error" | "warn" | "skip"
     plot_config=None,                       # PlotConfig override
-    semantic_config_path=None,              # JSON semantic alias overrides
 )
 ```
 
@@ -149,8 +148,7 @@ ISAWrapper(
 | `contacts()` | `DataFrame` | Investigation contacts |
 | `publications()` | `DataFrame` | Investigation publications |
 | `compare_studies(study_ids, assay_id=, assay_group=, file_type=, n_workers=)` | `dict[str, DataFrame]` | Lifecycle features across multiple studies |
-| `semantic_manifest(strict=, ...)` | `SemanticManifest` | Normalized factor/parameter labels |
-| `ai_context(include_semantics=, include_validation=)` | `dict` | JSON-safe payload for LLM pipelines |
+| `ai_context(include_validation=)` | `dict` | JSON-safe payload for LLM pipelines |
 | `list_tools()` | `list[dict]` | AI tool schemas |
 | `call_tool(name, args)` | `dict` | Invoke one AI tool by name |
 | `repair_log` *(property)* | `RepairLog` | Preprocessing repairs that were applied |
@@ -191,13 +189,14 @@ Acquired via `wrapper.study(id)`.
 | `overview()` | `StudyOverview` | Full summary including assay + factor lists |
 | `list_assays()` | `list[AssaySummary]` | Sensor channels -- no file I/O |
 | `list_factors()` | `list[FactorSummary]` | Experimental factors |
+| `assay(name_or_id_or_index)` | `AssayProxy` | Select by sensor name, assay ID, or 1-based position; ambiguous names raise |
+| `plot_sensor_features(feature="rms", assay_ids=None, file_type="auto")` | Bokeh figure | Feature curves across runs for selected sensors; checks units and calculation failures |
 | `variable_overview()` | `list[DataFrame]` | One DataFrame per unique condition (factor x value pairs) |
 | `test_matrix()` | `DataFrame` | Factor x run pivot table |
 | `operating_conditions()` | `DataFrame` | Subset of `test_matrix()`: operating-condition factors only |
 | `fault_conditions()` | `DataFrame` | Subset of `test_matrix()`: fault/damage/RUL factors only |
 | `get_fault_labels(assay_id=)` | `DataFrame` | Fault factor values per (assay, run) pair |
 | `sensor_catalog()` | `DataFrame` | One row per assay with sensor metadata and explicitly resolved sampling rate/unit |
-| `semantic_factors()` | `list[SemanticField]` | Normalized semantic labels for this study's factors |
 
 ### Navigation
 
@@ -262,7 +261,6 @@ Acquired via `study.assay(id)`.
 | `sensor_info()` | `dict` | All known metadata for this channel |
 | `list_measurement_params(run_id=)` | `DataFrame` | Protocol measurement parameters |
 | `list_processing_params(run_id=)` | `DataFrame` | Protocol processing parameters |
-| `semantic_parameters(run_id=)` | `dict[str, list[SemanticField]]` | Normalized parameter labels |
 
 ### Data loading
 
@@ -406,6 +404,9 @@ Acquired via `assay.run("run_05")` -- represents a single acquisition run.
 | `overview()` | `RunOverview` | Run metadata including factor values |
 | `load_dataframe(file_type=)` | `DataFrame` | File I/O -- same standard columns |
 | `factor_values()` | `dict[str, Any]` | Factor values for this specific run |
+| `load_factor_timeseries(name)` | `DataFrame` | Load a CSV-backed operating condition or other factor |
+| `plot_operating_conditions(factor_names=None)` | Bokeh layout | Plot the run's operating conditions with separate axes and units |
+| `plot_with_operating_conditions(factor_names=None, file_type="auto", alignment="recorded")` | Bokeh layout | Show recorded times, or choose `alignment="first_sample"` for approximate visual overlap |
 | `list_measurement_params()` | `DataFrame` | Protocol measurement parameters |
 | `list_processing_params()` | `DataFrame` | Protocol processing parameters |
 
@@ -526,7 +527,6 @@ Notebooks live under `python-wrapper/notebooks/`:
 
 01_api_basics/
   10_basic_load_and_inspect.ipynb   <- ISAWrapper, summary, list_studies
-  11_basic_semantic_normalization.ipynb
   12_basic_plot_and_export.ipynb
 
 02_features/

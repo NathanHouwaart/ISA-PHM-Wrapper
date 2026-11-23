@@ -20,3 +20,6 @@ venv/
 env/
 
 Todo-list
+.venv-*/
+.coverage
+htmlcov/

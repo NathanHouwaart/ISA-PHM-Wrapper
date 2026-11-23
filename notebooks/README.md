@@ -15,9 +15,9 @@ where you installed it or install it into the selected kernel's environment.
 Open a notebook and edit its first dataset configuration cell. Replace
 `path/to/your-dataset.isa-phm.json` with the actual ISA-PHM JSON file on your
 computer. The examples use that file's parent as the dataset root; change
-`DATA_ROOT` if your dataset uses another root. The XJTU small-subset notebook
-instead asks for the extracted dataset directory and its expected JSON filename.
-The datasets are not included in this repository.
+`DATA_ROOT` if your dataset uses another root. Dataset-specific notebooks may
+also live alongside their local datasets. The datasets are not included in this
+repository.
 
 The notebooks in `02_features` and the prognostic workflow were written for a
 specific XJTU dataset: some refer to named studies, multiple sensors, or the

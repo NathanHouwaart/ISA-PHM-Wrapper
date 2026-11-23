@@ -18,7 +18,6 @@ from .schemas import (
     ParameterValue,
     RunRecord,
 )
-from .semantic import SemanticNormalizer
 
 
 _FREQUENCY_UNITS = {"hz": 1.0, "khz": 1_000.0, "mhz": 1_000_000.0}
@@ -38,15 +37,11 @@ def _number(value: object) -> float | None:
 
 def resolve_sampling_frequency(params: Iterable[ParameterValue]) -> MetadataResolution:
     """Resolve an explicit sampling-frequency parameter, if one is present."""
-    normalizer = SemanticNormalizer()
     matches: list[tuple[float, ParameterValue]] = []
     invalid_names: list[str] = []
     statuses: set[str] = set()
     for parameter in params:
-        semantic = normalizer.normalize_parameter(
-            parameter.parameter_name, "measurement_parameter", parameter.unit
-        )
-        if semantic.semantic_key != "sampling_frequency" or semantic.status != "mapped":
+        if " ".join(parameter.parameter_name.casefold().split()) != "sampling rate":
             continue
         if isinstance(parameter.value, str) and parameter.value.strip().lower() in {"unknown", "not applicable"}:
             statuses.add(parameter.value.strip().lower())

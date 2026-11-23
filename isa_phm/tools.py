@@ -39,9 +39,8 @@ class ToolRegistry:
         self._specs: dict[str, _ToolSpec] = {
             "ai_context": _ToolSpec(
                 name="ai_context",
-                description="Return metadata-only normalized AI context.",
+                description="Return metadata-only AI context.",
                 input_schema={
-                    "include_semantics": "bool (default true)",
                     "include_validation": "bool (default false)",
                 },
             ),
@@ -50,10 +49,6 @@ class ToolRegistry:
                 description="Run wrapper validation checks and return issue report.",
                 input_schema={
                     "check_files": "bool (default true)",
-                    "semantic_strict": "bool (default false)",
-                    "max_unknown_ratio": "float (default 0.05)",
-                    "max_ambiguous_ratio": "float (default 0.0)",
-                    "require_override_config": "bool (default false)",
                 },
             ),
             "load_dataframe_with_meta": _ToolSpec(
@@ -133,20 +128,14 @@ class ToolRegistry:
             }
 
     def _tool_ai_context(self, args: dict[str, Any]) -> dict[str, Any]:
-        include_semantics = bool(args.get("include_semantics", True))
         include_validation = bool(args.get("include_validation", False))
         return self._wrapper.ai_context(
-            include_semantics=include_semantics,
             include_validation=include_validation,
         )
 
     def _tool_validate_dataset(self, args: dict[str, Any]) -> dict[str, Any]:
         report = self._wrapper.validate_dataset(
             check_files=bool(args.get("check_files", True)),
-            semantic_strict=bool(args.get("semantic_strict", False)),
-            max_unknown_ratio=float(args.get("max_unknown_ratio", 0.05)),
-            max_ambiguous_ratio=float(args.get("max_ambiguous_ratio", 0.0)),
-            require_override_config=bool(args.get("require_override_config", False)),
         )
         return report.model_dump()
 

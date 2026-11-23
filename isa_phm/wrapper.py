@@ -38,13 +38,11 @@ from .parser import ISAParser
 from .plotter import ISAPlotter, PlotConfig
 from .preprocessor import ISAPreprocessor
 from .proxy import QueryNavigator, StudyProxy
-from .semantic import SemanticNormalizer
 from .schemas import (
     DatasetValidationReport,
     InvestigationModel,
     InvestigationOverview,
     RepairLog,
-    SemanticManifest,
     StudySummary,
     ValidationIssue,
 )
@@ -80,8 +78,6 @@ class ISAWrapper:
         CSV malformed-line behavior. Default ``"error"`` (strict).
     plot_config : PlotConfig | None
         Optional style overrides passed to ISAPlotter.
-    semantic_config_path : str | Path | None
-        Optional JSON path with semantic alias overrides.
     """
 
     def __init__(
@@ -96,7 +92,6 @@ class ISAWrapper:
         chunk_rows: int = 250_000,
         csv_bad_lines: Literal["error", "warn", "skip"] = "error",
         plot_config: PlotConfig | None = None,
-        semantic_config_path: str | Path | None = None,
     ) -> None:
         path = Path(path)
         if not path.exists():
@@ -132,15 +127,13 @@ class ISAWrapper:
             csv_bad_lines=csv_bad_lines,
         )
         plotter = ISAPlotter(config=plot_config)
-        semantic = SemanticNormalizer(override_config_path=semantic_config_path)
-        navigator = QueryNavigator(investigation, integrator, plotter, semantic=semantic)
+        navigator = QueryNavigator(investigation, integrator, plotter)
 
         # Store as instance attributes.
         self._investigation: InvestigationModel = investigation
         self._integrator: DataIntegrator = integrator
         self._plotter: ISAPlotter = plotter
         self._navigator: QueryNavigator = navigator
-        self._semantic: SemanticNormalizer = semantic
         self._repair_log: RepairLog = repair_log
         self._source_path: Path = path.resolve()
         self._dataset_root: Path = data_root.resolve()
@@ -391,39 +384,8 @@ class ISAWrapper:
             "publications": publications_df,
         }
 
-    def semantic_manifest(
-        self,
-        *,
-        strict: bool = False,
-        max_unknown_ratio: float = 0.05,
-        max_ambiguous_ratio: float = 0.0,
-        require_override_config: bool = False,
-    ) -> SemanticManifest:
-        """
-        Return normalized semantic labels for factors and protocol parameters.
-
-        Parameters
-        ----------
-        strict : bool
-            When True, raise :class:`ValidationError` if strict thresholds fail.
-        max_unknown_ratio : float
-            Maximum allowed ratio of unknown semantic fields in strict mode.
-        max_ambiguous_ratio : float
-            Maximum allowed ratio of ambiguous semantic fields in strict mode.
-        require_override_config : bool
-            Require a user semantic override config for strict validation.
-        """
-        return self._semantic.build_manifest_with_controls(
-            self._investigation,
-            strict=strict,
-            max_unknown_ratio=max_unknown_ratio,
-            max_ambiguous_ratio=max_ambiguous_ratio,
-            require_override_config=require_override_config,
-        )
-
     def ai_context(
         self,
-        include_semantics: bool = True,
         include_validation: bool = False,
     ) -> dict[str, Any]:
         """
@@ -542,31 +504,6 @@ class ISAWrapper:
             "factors": factors_rows,
         }
 
-        if include_semantics:
-            manifest = self.semantic_manifest(strict=False)
-            payload["semantic_manifest"] = {
-                "investigation_id": manifest.investigation_id,
-                "study_factors": {
-                    k: [f.model_dump() for f in sorted(v, key=lambda x: x.source_name.lower())]
-                    for k, v in sorted(manifest.study_factors.items(), key=lambda x: x[0])
-                },
-                "assay_measurement_params": {
-                    k: [f.model_dump() for f in sorted(v, key=lambda x: x.source_name.lower())]
-                    for k, v in sorted(
-                        manifest.assay_measurement_params.items(),
-                        key=lambda x: x[0],
-                    )
-                },
-                "assay_processing_params": {
-                    k: [f.model_dump() for f in sorted(v, key=lambda x: x.source_name.lower())]
-                    for k, v in sorted(
-                        manifest.assay_processing_params.items(),
-                        key=lambda x: x[0],
-                    )
-                },
-                "diagnostics": manifest.diagnostics.model_dump(),
-            }
-
         if include_validation:
             payload["validation_report"] = self.validate_dataset().model_dump()
 
@@ -602,16 +539,11 @@ class ISAWrapper:
         self,
         *,
         check_files: bool = True,
-        semantic_strict: bool = False,
-        max_unknown_ratio: float = 0.05,
-        max_ambiguous_ratio: float = 0.0,
-        require_override_config: bool = False,
     ) -> DatasetValidationReport:
         """
         Return a structured dataset validation report.
 
-        Checks include structure completeness, file references, metadata quality,
-        and semantic coverage.
+        Checks include structure completeness, file references, and metadata quality.
         """
         issue_buckets: dict[tuple[str, str, str], dict[str, Any]] = {}
 
@@ -800,70 +732,6 @@ class ISAWrapper:
                                         "exists_at_extract": data_file.exists_at_extract,
                                     },
                                 )
-
-        manifest = self.semantic_manifest(
-            strict=False,
-            max_unknown_ratio=max_unknown_ratio,
-            max_ambiguous_ratio=max_ambiguous_ratio,
-            require_override_config=require_override_config,
-        )
-        diagnostics = manifest.diagnostics
-
-        if diagnostics.unknown_fields > 0:
-            add_issue(
-                code="SEM_UNKNOWN_FIELDS",
-                level="warning",
-                scope="semantic",
-                message="Unknown semantic fields detected.",
-                context={
-                    "unknown_fields": diagnostics.unknown_fields,
-                    "unknown_ratio": diagnostics.unknown_ratio,
-                },
-            )
-        if diagnostics.ambiguous_fields > 0:
-            add_issue(
-                code="SEM_AMBIGUOUS_FIELDS",
-                level="warning",
-                scope="semantic",
-                message="Ambiguous semantic fields detected.",
-                context={
-                    "ambiguous_fields": diagnostics.ambiguous_fields,
-                    "ambiguous_ratio": diagnostics.ambiguous_ratio,
-                },
-            )
-
-        violations = self._semantic.evaluate_strict_violations(
-            manifest,
-            max_unknown_ratio=max_unknown_ratio,
-            max_ambiguous_ratio=max_ambiguous_ratio,
-            require_override_config=require_override_config,
-        )
-        if semantic_strict and violations:
-            for code in violations:
-                add_issue(
-                    code=code,
-                    level="error",
-                    scope="semantic",
-                    message="Semantic strict validation violation.",
-                    context={
-                        "max_unknown_ratio": max_unknown_ratio,
-                        "max_ambiguous_ratio": max_ambiguous_ratio,
-                        "require_override_config": require_override_config,
-                    },
-                )
-        elif violations:
-            for code in violations:
-                add_issue(
-                    code=code,
-                    level="warning",
-                    scope="semantic",
-                    message="Semantic strict threshold would fail.",
-                    context={
-                        "max_unknown_ratio": max_unknown_ratio,
-                        "max_ambiguous_ratio": max_ambiguous_ratio,
-                        "require_override_config": require_override_config,
-                    },
-                )
 
         issues: list[ValidationIssue] = []
         for bucket in issue_buckets.values():

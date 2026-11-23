@@ -25,7 +25,7 @@ def _require_path(path: Path) -> None:
 
 
 class TestGoldenRegression:
-    def test_milling_parses_and_builds_semantics(self):
+    def test_milling_parses_and_exposes_metadata(self):
         _require_path(MILLING_JSON)
         wrapper = ISAWrapper(
             MILLING_JSON,
@@ -33,10 +33,9 @@ class TestGoldenRegression:
             strict_validation=False,
         )
         assert len(wrapper.investigation.studies) >= 1
-        manifest = wrapper.semantic_manifest()
-        assert manifest.diagnostics.total_fields >= 0
+        assert isinstance(wrapper.ai_context()["factors"], list)
 
-    def test_sietze_parses_and_builds_semantics(self):
+    def test_sietze_parses_and_exposes_metadata(self):
         _require_path(SIETZE_JSON)
         wrapper = ISAWrapper(
             SIETZE_JSON,
@@ -44,8 +43,7 @@ class TestGoldenRegression:
             strict_validation=False,
         )
         assert len(wrapper.investigation.studies) >= 1
-        manifest = wrapper.semantic_manifest()
-        assert manifest.diagnostics.total_fields >= 0
+        assert isinstance(wrapper.ai_context()["factors"], list)
 
 
 class TestXJTURegression:

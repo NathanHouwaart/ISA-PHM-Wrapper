@@ -167,7 +167,7 @@ class TestQueryNavigator:
         self, minimal_single_run_isa_file, tmp_path
     ):
         nav, _ = _build_navigator(minimal_single_run_isa_file, tmp_path)
-        with pytest.raises(StudyNotFoundError):
+        with pytest.raises(StudyNotFoundError, match=r"(?s)Valid range: 1–1.*Available studies:.*1\. Test Study"):
             nav.study(2)
 
     def test_study_not_found_raises(self, minimal_single_run_isa_file, tmp_path):
@@ -400,16 +400,29 @@ class TestStudyProxy:
         assert isinstance(assay, AssayProxy)
         assert assay.assay_id == "a_st01_se01"
 
+    def test_assay_by_sensor_name_and_ambiguous_name(self, minimal_single_run_isa_file, tmp_path):
+        study = self._study(minimal_single_run_isa_file, tmp_path)
+        original = study._study.assays[0]
+        original.sensor.alias = 'Sensor 6'
+        assert study.assay('sensor 6').assay_id == original.assay_id
+        second = original.model_copy(deep=True)
+        second.assay_id = 'another-id'
+        study._study.assays.append(second)
+        study._assay_by_id[second.assay_id] = second
+        with pytest.raises(AssayNotFoundError, match='ambiguous'):
+            study.assay('Sensor 6')
+        assert study.assay('another-id').assay_id == 'another-id'
+
     def test_assay_index_out_of_range_raises(
         self, minimal_single_run_isa_file, tmp_path
     ):
         study = self._study(minimal_single_run_isa_file, tmp_path)
-        with pytest.raises(AssayNotFoundError):
+        with pytest.raises(AssayNotFoundError, match=r'(?s)Valid range: 1–1.*Available sensors:.*1\..*assay ID: a_st01_se01'):
             study.assay(2)
 
     def test_assay_not_found_raises(self, minimal_single_run_isa_file, tmp_path):
         study = self._study(minimal_single_run_isa_file, tmp_path)
-        with pytest.raises(AssayNotFoundError):
+        with pytest.raises(AssayNotFoundError, match=r'(?s)Available sensors:.*assay ID: a_st01_se01'):
             study.assay("nonexistent_assay")
 
 
@@ -533,6 +546,15 @@ class TestAssayProxyMultiRun:
     def test_run_count_three(self, minimal_multi_run_isa_file, tmp_csv_dir):
         assay = self._assay(minimal_multi_run_isa_file, tmp_csv_dir)
         assert assay.run_count == 3
+
+    def test_run_by_number_and_id(self, minimal_multi_run_isa_file, tmp_csv_dir):
+        assay = self._assay(minimal_multi_run_isa_file, tmp_csv_dir)
+        assert assay.run(1).run_id == assay.run('run_01').run_id
+        assert assay.run(3).run_number == 3
+        with pytest.raises(RunNotFoundError):
+            assay.run(0)
+        with pytest.raises(RunNotFoundError, match=r'(?s)Valid range: 1–3.*1\. run_01.*3\. run_03'):
+            assay.run(4)
 
     def test_ambiguous_run_without_id_raises(
         self, minimal_multi_run_isa_file, tmp_csv_dir
@@ -1079,13 +1101,13 @@ class TestRunAnalysisCapabilities:
         nav, _ = _build_navigator(minimal_multi_run_isa_file, tmp_csv_dir)
         assay = nav.study("Test Study").assay("a_st01_se01")
         assay._assay.runs[0].measurement_params = [
-            ParameterValue(parameter_name="fs", value=25_600, unit="Hz")
+            ParameterValue(parameter_name="Sampling Rate", value=25_600, unit="Hz")
         ]
         assay._assay.runs[1].measurement_params = [
-            ParameterValue(parameter_name="fs", value=51_200, unit="Hz")
+            ParameterValue(parameter_name="Sampling Rate", value=51_200, unit="Hz")
         ]
         assay._assay.runs[2].measurement_params = [
-            ParameterValue(parameter_name="fs", value=25_600, unit="Hz")
+            ParameterValue(parameter_name="Sampling Rate", value=25_600, unit="Hz")
         ]
 
         capabilities = assay.analysis_capabilities()

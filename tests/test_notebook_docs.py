@@ -10,7 +10,6 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 CANONICAL_NOTEBOOKS = [
     "notebooks/00_getting_started/01_getting_started.ipynb",
     "notebooks/01_api_basics/10_basic_load_and_inspect.ipynb",
-    "notebooks/01_api_basics/11_basic_semantic_normalization.ipynb",
     "notebooks/01_api_basics/12_basic_plot_and_export.ipynb",
     "notebooks/02_features/20_lifecycle_features.ipynb",
     "notebooks/02_features/21_compare_studies.ipynb",

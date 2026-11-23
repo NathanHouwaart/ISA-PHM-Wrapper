@@ -16,7 +16,6 @@ from .attachments import Attachment
 from .catalogue import CATALOGUE_VERSION, lookup_quantity, lookup_unit
 from .plotter import ISAPlotter, PlotConfig
 from .proxy import AssayGroup
-from .semantic import SemanticNormalizer
 from .quantity_unit import QuantityUnitAdvisory, check_quantity_unit
 from .tools import ToolRegistry
 from .schemas import (
@@ -26,9 +25,6 @@ from .schemas import (
     DataLoadMetadata,
     DatasetValidationReport,
     PublicationModel,
-    SemanticDiagnostics,
-    SemanticField,
-    SemanticManifest,
     ValidationIssue,
     MetadataResolution,
 )
@@ -56,7 +52,6 @@ __all__ = [
     "ISAPlotter",
     "PlotConfig",
     "AssayGroup",
-    "SemanticNormalizer",
     "QuantityUnitAdvisory",
     "check_quantity_unit",
     "ToolRegistry",
@@ -66,9 +61,6 @@ __all__ = [
     "DataLoadMetadata",
     "DatasetValidationReport",
     "PublicationModel",
-    "SemanticField",
-    "SemanticDiagnostics",
-    "SemanticManifest",
     "ValidationIssue",
     "MetadataResolution",
     "ISAPHMError",

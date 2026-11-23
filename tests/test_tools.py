@@ -31,7 +31,7 @@ class TestToolRegistry:
         )
         out = wrapper.call_tool(
             "ai_context",
-            {"include_semantics": True, "include_validation": True},
+            {"include_validation": True},
         )
         assert out["tool"] == "ai_context"
         assert out["ok"] is True

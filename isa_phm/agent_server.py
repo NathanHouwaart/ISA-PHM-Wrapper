@@ -67,11 +67,10 @@ def _openai_tool_specs() -> list[dict[str, Any]]:
             "type": "function",
             "function": {
                 "name": "ai_context",
-                "description": "Return normalized metadata context for the dataset.",
+                "description": "Return metadata context for the dataset.",
                 "parameters": {
                     "type": "object",
                     "properties": {
-                        "include_semantics": {"type": "boolean"},
                         "include_validation": {"type": "boolean"},
                     },
                     "additionalProperties": False,
@@ -82,15 +81,11 @@ def _openai_tool_specs() -> list[dict[str, Any]]:
             "type": "function",
             "function": {
                 "name": "validate_dataset",
-                "description": "Validate dataset structure, files, and semantics.",
+                "description": "Validate dataset structure and files.",
                 "parameters": {
                     "type": "object",
                     "properties": {
                         "check_files": {"type": "boolean"},
-                        "semantic_strict": {"type": "boolean"},
-                        "max_unknown_ratio": {"type": "number"},
-                        "max_ambiguous_ratio": {"type": "number"},
-                        "require_override_config": {"type": "boolean"},
                     },
                     "additionalProperties": False,
                 },

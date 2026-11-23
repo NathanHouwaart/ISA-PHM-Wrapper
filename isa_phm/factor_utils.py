@@ -20,6 +20,19 @@ from typing import Any
 logger = logging.getLogger("isa_phm")
 
 
+def _read_factor_csv(csv_path: Path) -> "pd.DataFrame":
+    """Read numeric time series with an optional text header, or a scalar CSV."""
+    import pandas as pd
+
+    frame = pd.read_csv(csv_path, header=None)
+    if frame.shape[0] > 1 and frame.shape[1] > 1:
+        first = pd.to_numeric(frame.iloc[0], errors="coerce")
+        second = pd.to_numeric(frame.iloc[1], errors="coerce")
+        if first.isna().all() and second.notna().all():
+            frame = pd.read_csv(csv_path)
+    return frame
+
+
 def resolve_factor_csv_value(raw_value: Any, data_root: Path | None) -> Any:
     """
     Resolve a factor value, loading and interpreting CSV files when applicable.
@@ -63,9 +76,7 @@ def resolve_factor_csv_value(raw_value: Any, data_root: Path | None) -> Any:
         return raw_value
 
     try:
-        import pandas as pd
-
-        df = pd.read_csv(csv_path, header=None)
+        df = _read_factor_csv(csv_path)
     except Exception as exc:
         logger.warning(
             "factor_utils: failed to read CSV '%s': %s. Returning raw value.",
@@ -111,8 +122,6 @@ def load_factor_csv_dataframe(raw_value: str, data_root: Path) -> "pd.DataFrame"
     ValueError
         When the value does not end in ``.csv`` or the file does not exist.
     """
-    import pandas as pd
-
     stripped = raw_value.strip()
     if not stripped.lower().endswith(".csv"):
         raise ValueError(
@@ -124,4 +133,4 @@ def load_factor_csv_dataframe(raw_value: str, data_root: Path) -> "pd.DataFrame"
             f"CSV file not found: '{csv_path}' "
             f"(data_root='{data_root}', relative path='{stripped}')."
         )
-    return pd.read_csv(csv_path, header=None)
+    return _read_factor_csv(csv_path)

@@ -39,6 +39,18 @@ class TestExtractInvestigation:
         result = extractor.extract(minimal_single_run_isa)
         assert isinstance(result, InvestigationModel)
 
+    def test_csv_factor_path_remains_separate_from_its_unit(self, extractor, minimal_single_run_isa):
+        study = minimal_single_run_isa['studies'][0]
+        factor = study['materials']['samples'][0]['factorValues'][0]
+        factor['value'] = './Data/plc/Motor.csv'
+        factor['unit'] = {'@id': '#unit/rpm', 'annotationValue': 'rev/min', 'termAccession': 'http://qudt.org/vocab/unit/REV-PER-MIN'}
+        result = extractor.extract(minimal_single_run_isa)
+        assert result.studies[0].assays[0].runs[0].factor_values['Speed'] == './Data/plc/Motor.csv'
+        assert result.studies[0].factors[0].unit == 'rev/min'
+        factor['value'] = 1500
+        scalar = extractor.extract(minimal_single_run_isa)
+        assert scalar.studies[0].assays[0].runs[0].factor_values['Speed'] == '1500 rev/min'
+
 
 class TestReferenceResolver:
     def test_identical_definitions_and_bare_references_do_not_warn(self, caplog):
@@ -139,6 +151,21 @@ class TestExtractAssays:
         result = extractor.extract(minimal_single_run_isa)
         assay = result.studies[0].assays[0]
         assert assay.sensor.sensor_id == "aaaabbbb-0000-0000-0000-000000000001"
+
+    @pytest.mark.parametrize("canonical", [False, True])
+    def test_sensor_and_device_comment_spellings(self, extractor, minimal_single_run_isa, canonical):
+        study = minimal_single_run_isa["studies"][0]
+        for protocol in study["protocols"]:
+            for comment in protocol.get("comments", []):
+                if comment.get("name") == "Sensor id" and canonical:
+                    comment["name"] = "sensor_id"
+        names = ("sensor_alias", "physical_device_id", "physical_device_datasheet") if canonical else ("sensor alias", "physical device id", "physical device datasheet")
+        study["assays"][0]["comments"] = [dict(name=name, value=value) for name, value in zip(names, ("Accelerometer", "device-1", "./Datasheets/device.pdf"))]
+        sensor = extractor.extract(minimal_single_run_isa).studies[0].assays[0].sensor
+        assert sensor.sensor_id == "aaaabbbb-0000-0000-0000-000000000001"
+        assert sensor.alias == "Accelerometer"
+        assert sensor.physical_device_id == "device-1"
+        assert sensor.physical_device_datasheet == "./Datasheets/device.pdf"
 
 
 class TestExtractRuns:

@@ -45,6 +45,16 @@ def test_symlink_outside_dataset_is_not_previewed(tmp_path):
     assert discover_attachments(document, root)[0].status == "unsafe"
 
 
+@pytest.mark.parametrize("alias_name, sheet_name", [("sensor alias", "physical device datasheet"), ("sensor_alias", "physical_device_datasheet")])
+def test_device_datasheet_comment_names(tmp_path, alias_name, sheet_name):
+    (tmp_path / "Datasheets").mkdir()
+    (tmp_path / "Datasheets" / "device.pdf").write_bytes(b"pdf")
+    assay = {"filename": "a", "comments": [{"name": alias_name, "value": "Accel"}, {"name": sheet_name, "value": "./Datasheets/device.pdf"}]}
+    items = discover_attachments({"studies": [{"title": "S", "assays": [assay]}]}, tmp_path)
+    assert len(items) == 1
+    assert items[0].owner == "Accel" and items[0].status == "available"
+
+
 def test_wrapper_attachment_filters_use_actual_study(tmp_path, minimal_single_run_isa):
     (tmp_path / "Datasheets").mkdir()
     (tmp_path / "Datasheets" / "sensor.pdf").write_bytes(b"%PDF-1.4\n%%EOF")

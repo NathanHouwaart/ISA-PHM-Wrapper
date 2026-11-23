@@ -4,6 +4,17 @@ from isa_phm.capabilities import resolve_measured_unit, resolve_sampling_frequen
 from isa_phm.schemas import ParameterValue
 
 
+@pytest.mark.parametrize("name", ["fs", "Sample Rate", "Sampling Frequency", "Smpl Rte"])
+def test_sampling_rate_aliases_are_not_interpreted(name):
+    result = resolve_sampling_frequency([ParameterValue(parameter_name=name, value=25600, unit="Hz")])
+    assert not result.available
+
+
+def test_standard_sampling_rate_is_read_explicitly():
+    result = resolve_sampling_frequency([ParameterValue(parameter_name="Sampling Rate", value=25.6, unit="kHz")])
+    assert result.available and result.value == 25600
+
+
 @pytest.mark.parametrize("status", ["Unknown", "Not applicable"])
 def test_explicit_status_is_not_a_measured_unit(status):
     result = resolve_measured_unit([ParameterValue(parameter_name="Measured Unit", value=status)])
